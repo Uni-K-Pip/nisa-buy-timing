@@ -1,0 +1,26 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# ビルドで生成するデータ(Pages へは Actions が配備する)
+site/data/
+
+# 秘密と個人データ(リポジトリに入れない)
+.env
+.env.*
+*.pem
+*.key
+push-config*.json
+vapid*
+secrets/
+local/
+*.local.json
+
+# エディタと手元の道具
+.claude/
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
