@@ -1,0 +1,45 @@
+name: Pages
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: "30 22 * * 0-4"
+    - cron: "30 12 * * 1-5"
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: pages
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+      - uses: actions/configure-pages@v5
+      - run: python -m pip install -r requirements.txt
+      - run: python -m nbt.build --out site/data --run-kind "$RUN_KIND"
+        env:
+          VAPID_PUBLIC_KEY: ${{ vars.VAPID_PUBLIC_KEY }}
+          RUN_KIND: ${{ (github.event.schedule == '30 22 * * 0-4' && 'morning') || (github.event_name == 'schedule' && 'evening') || (github.event_name == 'push' && 'push') || 'manual' }}
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: site
+      - uses: actions/deploy-pages@v4
+        id: deployment
+      - run: python -m nbt.notify --send
+        if: github.event.schedule == '30 22 * * 0-4'
+        continue-on-error: true
+        env:
+          PUSH_CONFIG: ${{ secrets.PUSH_CONFIG }}
+          VAPID_PRIVATE_KEY: ${{ secrets.VAPID_PRIVATE_KEY }}
+          VAPID_SUBJECT: ${{ vars.VAPID_SUBJECT }}

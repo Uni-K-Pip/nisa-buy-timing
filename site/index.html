@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="robots" content="noindex,nofollow">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'">
+  <meta name="theme-color" content="#11283b">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="NISA 買い時">
+  <title>NISA 買い時</title>
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
+  <link rel="icon" href="./icons/icon-192.png">
+  <link rel="stylesheet" href="./styles.css">
+  <script type="module" src="./js/app.js"></script>
+</head>
+<body>
+  <header class="masthead">
+    <div class="frame masthead-inner">
+      <img src="./icons/icon-192.png" width="44" height="44" alt="">
+      <div><strong>NISA 買い時</strong><span>成長投資枠の参考指標</span></div>
+    </div>
+  </header>
+  <main class="frame">
+    <p id="storage-status" class="notice warning" role="status" hidden></p>
+    <div id="view" aria-labelledby="view-title">
+      <h1 id="view-title">今日</h1>
+      <p>データを読み込んでいます。</p>
+    </div>
+    <footer>投資助言ではありません。データや受渡日の推定値は参考情報です。公式画面で確認してください。SBI証券とは無関係です。</footer>
+  </main>
+  <nav class="tabbar" aria-label="画面">
+    <div class="frame tabs">
+      <button type="button" data-tab="today" aria-current="page"><span aria-hidden="true">◉</span>今日</button>
+      <button type="button" data-tab="chart"><span aria-hidden="true">⌁</span>チャート</button>
+      <button type="button" data-tab="plan"><span aria-hidden="true">☷</span>計画</button>
+      <button type="button" data-tab="verify"><span aria-hidden="true">≋</span>検証</button>
+      <button type="button" data-tab="settings"><span aria-hidden="true">⚙</span>設定</button>
+    </div>
+  </nav>
+  <dialog id="disclaimer" aria-labelledby="disclaimer-title">
+    <h2 id="disclaimer-title">ご利用の前に</h2>
+    <p>このアプリは投資助言を行いません。価格の推定値や予測は外れることがあります。</p>
+    <p>注文締切・約定日・受渡日・年内受渡の最終注文日は推定です。公式画面で確認し、ご自身で判断・注文してください。SBI証券や運用会社とは無関係です。</p>
+    <button type="button" class="primary" id="agree">確認しました</button>
+  </dialog>
+</body>
+</html>

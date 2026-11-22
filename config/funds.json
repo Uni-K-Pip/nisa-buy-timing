@@ -1,0 +1,94 @@
+{
+  "default_watch": [
+    "ifree-next-fang-plus"
+  ],
+  "funds": [
+    {
+      "id": "ifree-next-fang-plus",
+      "name": "iFreeNEXT FANG+インデックス",
+      "short_name": "FANG+",
+      "isin": "JP90C000FZD4",
+      "association_code": "04311181",
+      "nav_source": {
+        "type": "toushin_lib"
+      },
+      "proxy": {
+        "index_ticker": "^NYFANG",
+        "index_label": "NYSE FANG+指数",
+        "fx_ticker": "USDJPY=X"
+      },
+      "fx_component": true,
+      "order_closed_calendars": [
+        "NYSE"
+      ],
+      "settlement": {
+        "trade_lag_bd": 1,
+        "settle_bd_from_order": 6,
+        "order_cutoff_jst": "15:00",
+        "verified": false
+      },
+      "nisa": {
+        "growth": true,
+        "tsumitate": null
+      }
+    },
+    {
+      "id": "emaxis-slim-sp500",
+      "name": "eMAXIS Slim 米国株式(S&P500)",
+      "short_name": "S&P500",
+      "isin": "JP90C000GKC6",
+      "association_code": "03311187",
+      "nav_source": {
+        "type": "toushin_lib"
+      },
+      "proxy": {
+        "index_ticker": "^GSPC",
+        "index_label": "S&P 500指数",
+        "fx_ticker": "USDJPY=X"
+      },
+      "fx_component": true,
+      "order_closed_calendars": [
+        "NYSE"
+      ],
+      "settlement": {
+        "trade_lag_bd": 1,
+        "settle_bd_from_order": 6,
+        "order_cutoff_jst": "15:00",
+        "verified": false
+      },
+      "nisa": {
+        "growth": true,
+        "tsumitate": null
+      }
+    },
+    {
+      "id": "emaxis-slim-all-country",
+      "name": "eMAXIS Slim 全世界株式(オール・カントリー)",
+      "short_name": "オール・カントリー",
+      "isin": "JP90C000H1T1",
+      "association_code": "0331418A",
+      "nav_source": {
+        "type": "toushin_lib"
+      },
+      "proxy": {
+        "index_ticker": "ACWI",
+        "index_label": "iShares MSCI ACWI ETF",
+        "fx_ticker": "USDJPY=X"
+      },
+      "fx_component": true,
+      "order_closed_calendars": [
+        "NYSE"
+      ],
+      "settlement": {
+        "trade_lag_bd": 1,
+        "settle_bd_from_order": 6,
+        "order_cutoff_jst": "15:00",
+        "verified": false
+      },
+      "nisa": {
+        "growth": true,
+        "tsumitate": null
+      }
+    }
+  ]
+}

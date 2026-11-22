@@ -32,8 +32,9 @@ scripts/setup_push.py      VAPID 鍵の生成と gh への登録(ユーザーが
 scripts/make_icons.py      PWA アイコン(PNG)の生成。標準ライブラリだけ
 site/                      PWA 本体(ビルド不要の静的ファイル、ES modules)
   index.html  styles.css  sw.js  manifest.webmanifest  robots.txt  app-config.json
-  js/  icons/  tests/      (site/data/ はビルドで生成し、Git に入れない)
+  js/  icons/              (site/data/ はビルドで生成し、Git に入れない)
 tests/                     pytest(ネットワークを使わない)
+tests/js/                  node:test(site/ の外に置き、Pages に配備しない)
 .github/workflows/ci.yml   テストと privacy_check
 .github/workflows/pages.yml データ更新、Pages への配備、通知
 requirements.txt           Python の依存(版を固定)
@@ -244,20 +245,20 @@ Python 3.13。依存は pandas、numpy、yfinance、scikit-learn、holidays、py
 
 ## 7. ワークフロー
 
-- `ci.yml`: すべての push と PR。Python 3.13 で `pip install -r requirements.txt`、`pytest -q`、Node で `node --test site/tests/`、`python scripts/privacy_check.py`。
+- `ci.yml`: すべての push と PR。Python 3.13 で `pip install -r requirements.txt`、`pytest -q`、Node で `node --test "tests/js/*.test.mjs"`、`python scripts/privacy_check.py`。
 - `pages.yml`: `main` への push、`workflow_dispatch`、schedule の 2 本(`30 22 * * 0-4` = 平日 7:30 JST の朝、`30 12 * * 1-5` = 平日 21:30 JST の夜)。権限は `contents: read`、`pages: write`、`id-token: write`。同時実行は 1 つ。手順: checkout → setup-python(pip のキャッシュ)→ install → build → upload-pages-artifact(`site`)→ deploy-pages → 朝の実行だけ notify(`continue-on-error: true`。Secret がなければ何もしない)。build には `VAPID_PUBLIC_KEY` を `vars` から渡す。
 - 使う Actions: `actions/checkout@v5`、`actions/setup-python@v6`、`actions/setup-node@v5`、`actions/configure-pages@v5`、`actions/upload-pages-artifact@v4`、`actions/deploy-pages@v4`。
 
 ## 8. テスト(ネットワークを使わない)
 
 - Python(`tests/`): 営業日と年内受渡(4.1 の確認用の値)、CSV の読み込み(cp932、日付、分配金の調整)、指標の既知の値、スコアが 0〜100 で未来のデータに影響されないこと・価格が下がるとスコアが上がること、ML の学習行が答えの確定した行だけであること・乱数データで `valid: false`、検証の不変条件(価格一定なら差 0、回数と金額、期限を守る、V 字の合成データでスコア戦略が有利)、通知のまたぎ判定と日付判定・標準出力に購読先やラベルが出ないこと・`GITHUB_ACTIONS=true` で dry-run を拒否、偽のデータでのビルドが 5 章のキーをそろえて出すこと、privacy_check が違反の例を見つけること。
-- JS(`site/tests/*.test.mjs`、node:test): 計画の確認(6.2 の各項目)、年内受渡の計算(4.1 の確認用の値)、通知設定の JSON に金額が入らないこと。
+- JS(`tests/js/*.test.mjs`、node:test): 計画の確認(6.2 の各項目)、年内受渡の計算(4.1 の確認用の値)、通知設定の JSON に金額が入らないこと。
 
 ## 9. 確認コマンド
 
 ```
 .venv\Scripts\python -m pytest -q
-node --test site/tests/
+node --test "tests/js/*.test.mjs"
 .venv\Scripts\python scripts/privacy_check.py
 .venv\Scripts\python -m nbt.build --out site/data     (ネットワークが要る)
 .venv\Scripts\python -m http.server -d site 8000      (手元で見る)
