@@ -13,6 +13,8 @@ site/data/
 *.pem
 *.key
 push-config*.json
+# アプリの「設定を書き出す」で保存したファイル(購入計画と金額が入る)
+nbt-settings*.json
 vapid*
 secrets/
 local/
