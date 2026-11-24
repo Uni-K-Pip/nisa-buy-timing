@@ -31,11 +31,18 @@ jobs:
         env:
           VAPID_PUBLIC_KEY: ${{ vars.VAPID_PUBLIC_KEY }}
           RUN_KIND: ${{ (github.event.schedule == '30 22 * * 0-4' && 'morning') || (github.event_name == 'schedule' && 'evening') || (github.event_name == 'push' && 'push') || 'manual' }}
+      # 成果物の名前に実行の回数を付ける。同じ実行をやり直すと成果物がもう 1 つできるので、
+      # 名前が同じだと deploy-pages が「複数ある」と止まる。
       - uses: actions/upload-pages-artifact@v4
         with:
+          name: github-pages-${{ github.run_attempt }}
           path: site
+      # アップロードの直後は、成果物がまだ一覧に出ていないことがある。
+      - run: sleep 10
       - uses: actions/deploy-pages@v4
         id: deployment
+        with:
+          artifact_name: github-pages-${{ github.run_attempt }}
       - run: python -m nbt.notify --send
         if: github.event.schedule == '30 22 * * 0-4'
         continue-on-error: true
