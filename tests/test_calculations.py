@@ -298,24 +298,32 @@ def test_backtest_uses_harmonic_cost_deadlines_and_one_purchase_per_day():
     assert len(set(days)) == len(days) == len(bounds)
     assert all(day <= end for day, (_, end) in zip(days, bounds))
     prices = np.array([90.0, 100.0, 200.0])
-    average = average_cost(prices, [0, 1])
+    average = average_cost(prices, [1, 2])
     assert average == pytest.approx(2 / (1 / 100 + 1 / 200))
     assert average == pytest.approx(2 / sum(1 / fill for fill in prices[1:]))
     assert decision_days(bounds, np.full(20, 0.4), 0.4, ml=True) == [0, 6, 13]
 
 
 def test_backtest_flat_and_v_shape():
-    dates = pd.bdate_range("2025-01-01", periods=21)
+    dates = pd.DatetimeIndex([
+        day for day in pd.bdate_range("2025-01-01", periods=40) if is_business_day(day.date())
+    ][:21])
+    fund = {"id": "demo", "settlement": {"trade_lag_bd": 1, "order_cutoff_jst": "15:00"}}
     flat = pd.Series(100.0, index=dates)
     scores = flat * 0 + 70
     prob = flat * 0 + 0.3
-    result = compare(flat, scores, prob)
+    result = compare(flat, scores, prob, fund=fund)
     assert len(result["grid"]) == 60
     row = next(row for row in result["grid"] if (row["window"], row["count"], row["threshold"]) == (20, 3, 70))
     for key in ("score", "lump", "ml"):
-        assert row[key]["all"] == {"count": 1, "mean": 0, "median": 0, "win_rate": 0, "p05": 0, "p95": 0}
+        values = row[key]["all"]
+        expected = {"count": 1, "independent": 1, "mean": 0, "median": 0, "win_rate": 0, "p05": 0, "p95": 0, "ci": None}
+        assert {name: values[name] for name in expected} == expected
+        if key != "lump":
+            assert values["vs_lump"]["mean"] == 0
+            assert values["vs_placebo"]["mean"] is None
     price = pd.Series(np.r_[np.linspace(125, 50, 10), np.linspace(55, 125, 11)], index=dates)
     score = pd.Series(np.where(price <= 65, 90, 0), index=dates)
-    one = compare(price, score, prob)["grid"][1]
+    one = compare(price, score, prob, fund=fund)["grid"][1]
     assert one["score"]["all"]["mean"] < 0
     assert one["score"]["recent_3y"]["win_rate"] == 100

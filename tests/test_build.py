@@ -10,6 +10,7 @@ from nbt.build import JST, build, clean
 from nbt.indicators import indicators
 from nbt.score import score_series, score_summary
 from nbt.series import price_series
+from nbt.validation import load_registration
 
 
 class FakeSource:
@@ -85,8 +86,9 @@ def test_fake_build_file_contract(tmp_path, monkeypatch, estimate):
         assert {"value", "category", "category_name", "elements", "date", "comparison",
                 "previous_value", "basis"} <= fund["score"].keys()
         assert {"probability", "date", "valid", "metrics", "note"} <= fund["ml"].keys()
-        assert fund["ml"]["basis"] == "confirmed"
-        assert fund["ml"]["date"] == fund["nav"]["date"] == "2026-11-20"
+        assert fund["nav"]["date"] == "2026-11-20"
+        assert fund["ml"]["basis"] == ("estimate" if estimate else "confirmed")
+        assert fund["ml"]["date"] == ("2026-11-24" if estimate else "2026-11-20")
         assert {"last_order_date", "last_settle_date", "remaining_business_days", "upcoming_orders",
                 "verified", "trade_lag_bd", "settle_bd_from_order", "order_cutoff_jst"} <= fund["settlement"].keys()
         assert {"nav", "index", "fx", "proxy", "vix", "warnings"} == fund["status"].keys()
@@ -101,9 +103,40 @@ def test_fake_build_file_contract(tmp_path, monkeypatch, estimate):
         assert series["dates"][0] == "2025-08-01"
         assert series["dates"][-1] == "2026-11-20"
         assert None in series["ml_prob"]
-        assert {"description", "grid"} <= backtest.keys()
+        assert set(backtest) == {
+            "schema", "description", "ml_probability_at_most", "periods", "grid",
+            "grid_summary", "evidence", "estimate_impact",
+        }
+        assert backtest["schema"] == 2
+        assert backtest["periods"]["nav"] == {"from": series["dates"][0], "to": series["dates"][-1]}
         assert len(backtest["grid"]) == 60
-        assert {"auc", "brier", "baseline_brier", "brier_skill", "count", "valid", "calibration"} == ml.keys()
+        assert {"auc", "brier", "baseline_brier", "brier_skill", "count", "valid", "calibration",
+                "auc_ci", "brier_skill_ci", "independent", "forward", "estimate_impact"} == ml.keys()
+        assert set(ml["forward"]) == {"count", "auc", "brier_skill", "auc_ci", "brier_skill_ci"}
+        assert set(ml["estimate_impact"]) == {
+            "prob_abs_diff_mean", "prob_abs_diff_p95", "auc_confirmed", "brier_skill_confirmed",
+            "auc_estimate", "brier_skill_estimate",
+        }
+        assert set(backtest["estimate_impact"]) == {
+            "score_abs_diff_mean", "score_abs_diff_p95", "category_mismatch_rate", "threshold_mismatch_rate", "days", "primary",
+        }
+        basic = {"count", "independent", "mean", "median", "win_rate", "p05", "p95", "ci"}
+        strategy_keys = basic | {"delay", "vs_lump", "vs_placebo"}
+        for item in backtest["grid"]:
+            for strategy, keys in (("score", strategy_keys), ("ml", strategy_keys), ("lump", basic)):
+                assert item[strategy].keys() == {"all", "nav", "recent_3y"}
+                assert all(set(period) == keys for period in item[strategy].values())
+        evidence = backtest["evidence"]
+        assert evidence["protocol"]["level"] == 0.998
+        assert evidence["strategies"].keys() == {"score", "ml"}
+        for strategy in evidence["strategies"].values():
+            assert strategy["looks"]["last"] is None
+            assert strategy["comparisons"].keys() == {"regular", "lump", "placebo"}
+            for comparison in strategy["comparisons"].values():
+                assert comparison.keys() == {"status", "history", "history_nav", "forward", "judgment"}
+                assert comparison["history"].keys() == basic | {"t_ci"}
+                assert comparison["forward"].keys() == basic | {"years"}
+                assert comparison["judgment"] is None
 
         index = source.close(fund["proxy"]["index_ticker"])
         fx = source.fx("USDJPY=X")
@@ -155,6 +188,12 @@ def test_build_degrades_and_records_warnings(tmp_path, missing, expected):
     assert not first["status"][missing]
     assert first["status"]["proxy"] == (missing == "nav")
     assert first["status"]["warnings"]
+    if missing == "nav":
+        backtest = json.loads((tmp_path / "backtest" / f"{first['id']}.json").read_text(encoding="utf-8"))
+        ml = json.loads((tmp_path / "ml" / f"{first['id']}.json").read_text(encoding="utf-8"))
+        assert backtest["periods"]["nav"] is None
+        assert backtest["estimate_impact"] is None
+        assert ml["estimate_impact"] is None
     if missing == "fx":
         meta = json.loads((tmp_path / "meta.json").read_text(encoding="utf-8"))
         assert meta["market_dates"]["USDJPY=X"] is None
@@ -173,3 +212,22 @@ def test_json_precision():
     assert clean({"probability": np.float64(0.412345), "price": 200.123, "error": np.nan}) == {
         "probability": 0.4123, "price": 200.12, "error": None,
     }
+
+
+def test_build_uses_injected_registration_and_now(tmp_path):
+    registration = load_registration()
+    for entry in registration["strategies"]:
+        entry["registered"] = "2024-11-24"
+    source = FakeSource()
+    name = "backtest/ifree-next-fang-plus.json"
+    for day in (23, 24):
+        build(tmp_path, source, datetime(2026, 11, day, 9, tzinfo=JST), registration=registration)
+        artifact = json.loads((tmp_path / name).read_text(encoding="utf-8"))
+        strategy = artifact["evidence"]["strategies"]["score"]
+        assert strategy["registered"] == "2024-11-24"
+        result = strategy["comparisons"]["regular"]["judgment"]
+        if day == 23:
+            assert result is None
+        else:
+            assert result["look"] == "2026-11-24"
+            assert result["level"] == 0.998

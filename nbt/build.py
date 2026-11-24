@@ -8,10 +8,10 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from . import backtest, indicators, ml, score
+from . import backtest, indicators, ml, score, validation
 from .calendar import export_calendar
 from .fetch import DataSource
-from .series import domestic_dates, estimated_series, latest_estimate, nowcast, price_series, remove_fx_outliers
+from .series import _domestic_range, domestic_dates, estimated_series, latest_estimate, nowcast, price_series, remove_fx_outliers
 from .settlement import settlement_summary
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -26,6 +26,8 @@ SOURCES = [
 FRACTION_KEYS = {
     "auc", "brier", "baseline_brier", "brier_skill", "probability", "previous_probability",
     "ml_probability_at_most", "ml_prob", "lower", "upper", "mean_probability", "observed_rate",
+    "auc_ci", "brier_skill_ci", "auc_confirmed", "auc_estimate", "brier_skill_confirmed",
+    "brier_skill_estimate", "prob_abs_diff_mean", "prob_abs_diff_p95", "probability_at_most", "level",
 }
 
 
@@ -65,11 +67,13 @@ def quote(values):
     }
 
 
-def build(out, source=None, now=None, run_kind="manual", config=None):
+def build(out, source=None, now=None, run_kind="manual", config=None, registration=None):
     source = DataSource() if source is None else source
     now = datetime.now(JST) if now is None else now.astimezone(JST)
     if config is None:
         config = json.loads((ROOT / "config/funds.json").read_text(encoding="utf-8"))
+    registration = validation.load_registration(registration)
+    ml_registered = next((entry["registered"] for entry in registration["strategies"] if entry["id"] == "ml"), None)
     out = Path(out)
     market = {}
     fx_market = {}
@@ -123,23 +127,33 @@ def build(out, source=None, now=None, run_kind="manual", config=None):
         score_fx = daily_fx if fund.get("fx_component") else None
         features = indicators.indicators(price, score_fx, vix)
         scores, percentiles = score.score_series(features)
-        probabilities, latest_prob, previous_prob, metrics = ml.experiment(price, features)
         score_info = score.score_summary(scores, percentiles, features)
         point = latest_estimate(price, proxy_jp)
+        estimated = estimated_series(price, proxy_jp, nav_start)
+        extended_price = price
+        extended_estimate = estimated
+        if point is not None:
+            day, value = point
+            latest_price = pd.Series([value], index=[day])
+            extended_price = pd.concat([price, latest_price])
+            extended_estimate = pd.concat([estimated, latest_price])
+        decision = indicators.decision_indicators(extended_price, extended_estimate, score_fx, vix)
+        decision_scores, decision_pct = score.decision_score_series(features, decision)
         if point is None:
             score_info["basis"] = "confirmed"
             score_info["previous_value"] = scores.iloc[-2] if len(scores) >= 2 else None
         else:
             confirmed = {key: score_info[key] for key in ("value", "category", "category_name", "date")}
-            day, value = point
-            latest_price = pd.Series([value], index=[day])
-            estimated = estimated_series(price, proxy_jp, nav_start)
-            decision = indicators.decision_indicators(
-                pd.concat([price, latest_price]), pd.concat([estimated, latest_price]), score_fx, vix,
-            )
-            decision_scores, decision_pct = score.decision_score_series(features, decision)
             score_info = score.score_summary(decision_scores, decision_pct, decision)
             score_info.update(basis="estimate", previous_value=decision_scores.loc[price.index[-1]], confirmed=confirmed)
+        # NAV が欠けた国内営業日も、ML の約定日と予測期間の日数に数える。
+        ml_days = _domestic_range(price.index[0], price.index[-1])
+        ml_basis = "estimate" if point is not None else "confirmed"
+        probabilities, latest_prob, previous_prob, metrics = ml.experiment(
+            price.reindex(ml_days), features.reindex(ml_days), decision, lag=fund["settlement"]["trade_lag_bd"],
+            registered=ml_registered, nav_start=nav_start, latest_basis=ml_basis,
+        )
+        probabilities = probabilities.reindex(price.index)
         status = {
             "nav": has_nav, "index": not index.empty, "fx": not fx.empty,
             "proxy": not proxy_jp.empty, "vix": not vix.empty, "warnings": [],
@@ -167,8 +181,8 @@ def build(out, source=None, now=None, run_kind="manual", config=None):
             "score": score_info,
             "ml": {
                 "probability": latest_prob, "previous_probability": previous_prob,
-                "date": price.index[-1].date().isoformat(), "valid": metrics["valid"],
-                "basis": "confirmed",
+                "date": decision.index[-1].date().isoformat(), "valid": metrics["valid"],
+                "basis": ml_basis,
                 "metrics": {key: value for key, value in metrics.items() if key != "calibration"},
                 "note": "過去データで検証した実験モデルです。" if metrics["valid"] else ml.INVALID_NOTE,
             },
@@ -183,7 +197,10 @@ def build(out, source=None, now=None, run_kind="manual", config=None):
         files[f"series/{fund_id}.json"] = {
             "dates": chart.index.strftime("%Y-%m-%d").tolist(), **chart.to_dict(orient="list"),
         }
-        files[f"backtest/{fund_id}.json"] = backtest.compare(price, scores, probabilities)
+        files[f"backtest/{fund_id}.json"] = backtest.compare(
+            price, decision_scores, probabilities, fund=fund, confirmed_scores=scores, nav_start=nav_start,
+            registration=registration, today=now.date(),
+        )
         files[f"ml/{fund_id}.json"] = metrics
 
     stamp = now.isoformat(timespec="seconds")
