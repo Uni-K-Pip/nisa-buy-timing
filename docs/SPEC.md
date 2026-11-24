@@ -252,7 +252,9 @@ Python 3.13。依存は pandas、numpy、yfinance、scikit-learn、holidays、py
 ## 7. ワークフロー
 
 - `ci.yml`: すべての push と PR。Python 3.13 で `pip install -r requirements.txt`、`pytest -q`、Node で `node --test "tests/js/*.test.mjs"`、`python scripts/privacy_check.py`。
-- `pages.yml`: `main` への push、`workflow_dispatch`、schedule の 2 本(`30 22 * * 0-4` = 平日 7:30 JST の朝、`30 12 * * 1-5` = 平日 21:30 JST の夜)。権限は `contents: read`、`pages: write`、`id-token: write`。同時実行は 1 つ。手順: checkout → setup-python(pip のキャッシュ)→ install → build → upload-pages-artifact(`site`)→ deploy-pages → 朝の実行だけ notify(`continue-on-error: true`。Secret がなければ何もしない)。build には `VAPID_PUBLIC_KEY` を `vars` から渡す。
+- `pages.yml`: `main` への push、`workflow_dispatch`、schedule の 2 本(`30 22 * * 0-4` = 平日 7:30 JST の朝、`30 12 * * 1-5` = 平日 21:30 JST の夜)。権限は `contents: read`、`pages: write`、`id-token: write`。同時実行は 1 つ。手順: checkout → setup-python(pip のキャッシュ)→ install → build → upload-pages-artifact(`site`)→ 10 秒待つ → deploy-pages → 朝の実行だけ notify(`continue-on-error: true`。Secret がなければ何もしない)。build には `VAPID_PUBLIC_KEY` を `vars` から渡す。
+  - 成果物の名前は `github-pages-<実行の回数>`(`github.run_attempt`)にし、deploy-pages にも同じ名前を渡す。同じ実行をやり直すと成果物がもう 1 つできるので、名前が同じだと deploy-pages が「複数ある」と止まる。回数を付ければ、失敗した実行をそのままやり直せる。
+  - 配備の前に 10 秒待つのは、アップロードの直後に成果物がまだ一覧に出ておらず、deploy-pages が「見つからない」と止まることがあるため。
 - 使う Actions: `actions/checkout@v5`、`actions/setup-python@v6`、`actions/setup-node@v5`、`actions/configure-pages@v5`、`actions/upload-pages-artifact@v4`、`actions/deploy-pages@v4`。
 
 ## 8. テスト(ネットワークを使わない)
