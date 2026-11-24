@@ -11,7 +11,7 @@ import pandas as pd
 from . import backtest, indicators, ml, score
 from .calendar import export_calendar
 from .fetch import DataSource
-from .series import domestic_dates, nowcast, price_series
+from .series import domestic_dates, estimated_series, latest_estimate, nowcast, price_series, remove_fx_outliers
 from .settlement import settlement_summary
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -72,6 +72,8 @@ def build(out, source=None, now=None, run_kind="manual", config=None):
         config = json.loads((ROOT / "config/funds.json").read_text(encoding="utf-8"))
     out = Path(out)
     market = {}
+    fx_market = {}
+    empty_fx = pd.DataFrame(columns=["open", "close"], index=pd.DatetimeIndex([]), dtype=float)
     files = {}
 
     def close(ticker):
@@ -86,6 +88,18 @@ def build(out, source=None, now=None, run_kind="manual", config=None):
                 market[ticker] = pd.Series(dtype=float, index=pd.DatetimeIndex([]))
         return market[ticker]
 
+    def fx_quotes(ticker):
+        if ticker and ticker not in fx_market:
+            try:
+                values = source.fx(ticker)[["open", "close"]].dropna().sort_index()
+                values = values.loc[~values.index.duplicated(keep="last") & values.gt(0).all(axis=1)]
+                fx_market[ticker] = pd.concat(
+                    {key: remove_fx_outliers(values[key]) for key in values.columns}, axis=1, sort=True,
+                )
+            except Exception:
+                fx_market[ticker] = empty_fx
+        return fx_market.get(ticker, empty_fx)
+
     latest = []
     vix = close("^VIX")
     for fund in config["funds"]:
@@ -98,19 +112,34 @@ def build(out, source=None, now=None, run_kind="manual", config=None):
                 pass
         proxy_cfg = fund.get("proxy", {})
         index = close(proxy_cfg.get("index_ticker"))
-        fx = close(proxy_cfg.get("fx_ticker"))
-        price, nav, proxy_us, proxy_jp = price_series(nav, index, fx)
+        fx = fx_quotes(proxy_cfg.get("fx_ticker"))
+        price, nav, proxy_jp, daily_fx, nav_start = price_series(nav, index, fx)
         if price.empty:
             raise ValueError(f"利用できる価格系列がありません: {fund_id}")
-        has_nav = not nav.empty
+        has_nav = nav_start is not None
         if not has_nav:
             # 代理系列だけの銘柄は、極端に古い指数の履歴(例: 1928 年からの S&P 500)を使わない。
             price = price.loc[price.index >= pd.Timestamp(now.date()) - pd.DateOffset(years=PROXY_ONLY_YEARS)]
-        features = indicators.indicators(price, fx if fund.get("fx_component") else None, vix)
+        score_fx = daily_fx if fund.get("fx_component") else None
+        features = indicators.indicators(price, score_fx, vix)
         scores, percentiles = score.score_series(features)
         probabilities, latest_prob, previous_prob, metrics = ml.experiment(price, features)
         score_info = score.score_summary(scores, percentiles, features)
-        score_info["previous_value"] = scores.iloc[-2] if len(scores) >= 2 else None
+        point = latest_estimate(price, proxy_jp)
+        if point is None:
+            score_info["basis"] = "confirmed"
+            score_info["previous_value"] = scores.iloc[-2] if len(scores) >= 2 else None
+        else:
+            confirmed = {key: score_info[key] for key in ("value", "category", "category_name", "date")}
+            day, value = point
+            latest_price = pd.Series([value], index=[day])
+            estimated = estimated_series(price, proxy_jp, nav_start)
+            decision = indicators.decision_indicators(
+                pd.concat([price, latest_price]), pd.concat([estimated, latest_price]), score_fx, vix,
+            )
+            decision_scores, decision_pct = score.decision_score_series(features, decision)
+            score_info = score.score_summary(decision_scores, decision_pct, decision)
+            score_info.update(basis="estimate", previous_value=decision_scores.loc[price.index[-1]], confirmed=confirmed)
         status = {
             "nav": has_nav, "index": not index.empty, "fx": not fx.empty,
             "proxy": not proxy_jp.empty, "vix": not vix.empty, "warnings": [],
@@ -126,11 +155,11 @@ def build(out, source=None, now=None, run_kind="manual", config=None):
 
         nav_quote = quote(nav["nav"])
         index_quote = quote(index)
-        fx_quote = quote(fx)
+        fx_quote = quote(fx["close"].dropna())
         latest.append({
             **{key: fund[key] for key in ("id", "name", "short_name")},
             "series_kind": "nav" if has_nav else "proxy", "nav": nav_quote,
-            "nowcast": nowcast(nav, proxy_us),
+            "nowcast": nowcast(nav, proxy_jp, index),
             "proxy": {
                 "index_ticker": proxy_cfg.get("index_ticker"), "index_label": proxy_cfg.get("index_label"),
                 "index": index_quote, "fx": fx_quote,
@@ -139,6 +168,7 @@ def build(out, source=None, now=None, run_kind="manual", config=None):
             "ml": {
                 "probability": latest_prob, "previous_probability": previous_prob,
                 "date": price.index[-1].date().isoformat(), "valid": metrics["valid"],
+                "basis": "confirmed",
                 "metrics": {key: value for key, value in metrics.items() if key != "calibration"},
                 "note": "過去データで検証した実験モデルです。" if metrics["valid"] else ml.INVALID_NOTE,
             },
@@ -149,7 +179,7 @@ def build(out, source=None, now=None, run_kind="manual", config=None):
             "index": domestic_dates(index), "score": scores, "ml_prob": probabilities,
         }, axis=1, sort=True)
         # 画面に要るのは主系列の期間だけ。指数の長い履歴まで載せるとスマホで重くなる。
-        chart = chart.loc[chart.index >= price.index[0]]
+        chart = chart.loc[nav_start:price.index[-1]] if has_nav else chart.loc[price.index[0]:]
         files[f"series/{fund_id}.json"] = {
             "dates": chart.index.strftime("%Y-%m-%d").tolist(), **chart.to_dict(orient="list"),
         }
@@ -157,6 +187,7 @@ def build(out, source=None, now=None, run_kind="manual", config=None):
         files[f"ml/{fund_id}.json"] = metrics
 
     stamp = now.isoformat(timespec="seconds")
+    market_quotes = market | {ticker: values["close"].dropna() for ticker, values in fx_market.items()}
     files.update({
         "latest.json": {
             "schema": 1, "generated_at": stamp, "run_kind": run_kind, "disclaimer": DISCLAIMER,
@@ -164,7 +195,7 @@ def build(out, source=None, now=None, run_kind="manual", config=None):
         },
         "meta.json": {
             "generated_at": stamp, "run_kind": run_kind,
-            "market_dates": {ticker: quote(values)["date"] if not values.empty else None for ticker, values in market.items()},
+            "market_dates": {ticker: quote(values)["date"] if not values.empty else None for ticker, values in market_quotes.items()},
             "funds": [{
                 "id": fund["id"], "nav_date": (fund["nav"] or {}).get("date"),
                 "index_date": (fund["proxy"]["index"] or {}).get("date"),
