@@ -12,6 +12,7 @@ const disclaimer = document.querySelector("#disclaimer");
 const titles = { today: "今日", chart: "チャート", plan: "計画", verify: "検証", settings: "設定" };
 const views = { today: renderToday, chart: renderChart, plan: renderPlans, verify: renderVerify, settings: renderSettings };
 let tab = "today";
+let drawing;
 
 function showDisclaimer() {
   if (!disclaimer.open) disclaimer.showModal();
@@ -34,34 +35,49 @@ const saved = loadState(latest?.default_watch);
 const context = {
   latest, funds: latest?.funds ?? [], calendar: calendar ? calendarDays(calendar) : null,
   calendarYears: calendar?.years, push, appConfig, serviceWorker, state: saved.state, today: jstToday(),
-  selection: { years: 1 }, render, showDisclaimer,
+  selection: { years: 1, verifyPeriod: "all" }, render, showDisclaimer, showTab,
   persist() {
     storageStatus(saveState(this.state));
   },
   replaceState(state, alreadyCleared) {
     this.state = state;
-    this.selection = { years: 1 };
+    this.selection = { years: 1, verifyPeriod: "all" };
     if (alreadyCleared === undefined) this.persist();
     else storageStatus(alreadyCleared);
   },
 };
 
 function render() {
+  const active = view.contains(document.activeElement) ? document.activeElement : null;
+  const segment = active?.dataset.segment;
+  const group = active?.parentElement?.getAttribute("aria-label");
+  for (const panel of view.querySelectorAll("[data-details-key]")) {
+    context.selection.details?.set(panel.dataset.detailsKey, panel.open);
+  }
+  drawing?.abort();
+  drawing = new AbortController();
+  context.renderSignal = drawing.signal;
   context.today = jstToday();
   view.replaceChildren(heading(titles[tab]), ...views[tab](context).filter(Boolean));
+  if (segment !== undefined) {
+    [...view.querySelectorAll("[data-segment]")].find(control =>
+      control.dataset.segment === segment && control.parentElement.getAttribute("aria-label") === group)?.focus();
+  }
+}
+
+function showTab(next) {
+  tab = next;
+  tabs.forEach(item => {
+    if (item.dataset.tab === tab) item.setAttribute("aria-current", "page");
+    else item.removeAttribute("aria-current");
+  });
+  render();
+  view.querySelector("h1").focus();
+  window.scrollTo(0, 0);
 }
 
 for (const control of tabs) {
-  control.addEventListener("click", () => {
-    tab = control.dataset.tab;
-    tabs.forEach(item => {
-      if (item === control) item.setAttribute("aria-current", "page");
-      else item.removeAttribute("aria-current");
-    });
-    render();
-    view.querySelector("h1").focus();
-    window.scrollTo(0, 0);
-  });
+  control.addEventListener("click", () => showTab(control.dataset.tab));
 }
 disclaimer.addEventListener("cancel", event => event.preventDefault());
 document.querySelector("#agree").addEventListener("click", () => {

@@ -8,7 +8,8 @@ export const DEFAULT_NOTIFICATIONS = Object.freeze({
 });
 
 export function defaults(watch = []) {
-  return { v: 1, agreed: false, watch: [...watch], plans: [], notifications: { ...DEFAULT_NOTIFICATIONS }, push_hash: null };
+  return { v: 1, agreed: false, guide_closed: false, watch: [...watch], plans: [],
+    notifications: { ...DEFAULT_NOTIFICATIONS }, push_hash: null };
 }
 
 const plain = value => value !== null && typeof value === "object" && !Array.isArray(value);
@@ -43,6 +44,7 @@ export function parseBackup(raw) {
   const saved = JSON.parse(raw);
   const rules = saved?.notifications;
   if (!plain(saved) || saved.v !== 1 || typeof saved.agreed !== "boolean" ||
+      (Object.hasOwn(saved, "guide_closed") && typeof saved.guide_closed !== "boolean") ||
       !Array.isArray(saved.watch) || !saved.watch.every(id) ||
       !Array.isArray(saved.plans) || !saved.plans.every(validPlan) ||
       new Set(saved.plans.map(plan => plan.id)).size !== saved.plans.length ||

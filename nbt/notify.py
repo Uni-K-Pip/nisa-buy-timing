@@ -8,12 +8,16 @@ import math
 import os
 from pathlib import Path
 import sys
+import time
 from urllib.parse import urlsplit
 
 from .calendar import business_days_between, is_business_day
 
 ROOT = Path(__file__).resolve().parents[1]
 JST = timezone(timedelta(hours=9), "JST")
+# --send の実行にかける最短の秒数。送信のある日だけ長くかかると、公開のログの時刻から
+# 通知を送った日が分かるので、早く済んだ日は待ってそろえる。
+SEND_SECONDS = 20
 
 
 def number(value):
@@ -114,14 +118,17 @@ def signing_key(private_key, subject):
 
 
 def main(argv=None, *, sender=None, today=None):
+    started = time.monotonic()
     parser = argparse.ArgumentParser()
     actions = parser.add_mutually_exclusive_group(required=True)
     actions.add_argument("--send", action="store_true")
     actions.add_argument("--dry-run", type=Path)
     parser.add_argument("--data", type=Path, default=ROOT / "site/data")
     args = parser.parse_args(argv)
-    counts = dict.fromkeys(("rules", "triggered", "sent", "failed", "expired"), 0)
-    result = 0
+    # 公開リポジトリの Actions のログは誰でも読める。件数を出すと、通知の条件を満たした日
+    # (買う予定の日や目安に達した日)が分かるので、出すのは成否だけにする。
+    status = "skipped"
+    problems = set()
     try:
         if args.dry_run and os.getenv("GITHUB_ACTIONS", "").lower() == "true":
             raise PermissionError
@@ -136,8 +143,7 @@ def main(argv=None, *, sender=None, today=None):
         latest = json.loads((args.data / "latest.json").read_text(encoding="utf-8"))
         if args.send and latest.get("run_kind") != "morning":
             return 0
-        counts["rules"], messages = notifications(config["rules"], latest, today or datetime.now(JST).date())
-        counts["triggered"] = len(messages)
+        _, messages = notifications(config["rules"], latest, today or datetime.now(JST).date())
         if args.dry_run:
             with args.dry_run.open("x", encoding="utf-8") as output:
                 json.dump(messages, output, ensure_ascii=False, indent=2)
@@ -163,20 +169,23 @@ def main(argv=None, *, sender=None, today=None):
                                        ttl=12 * 60 * 60, timeout=30)
                         finally:
                             logging.disable(previous_log_level)
-                        counts["sent"] += 1
                     except Exception as error:
-                        if getattr(getattr(error, "response", None), "status_code", None) in (404, 410):
-                            counts["expired"] += 1
-                        else:
-                            counts["failed"] += 1
-                        print(type(error).__name__, file=sys.stderr)
-            result = int(counts["failed"] > 0)
+                        expired = getattr(getattr(error, "response", None), "status_code", None) in (404, 410)
+                        problems.add("expired" if expired else type(error).__name__)
+        status = "ok"
     except Exception as error:
-        print(type(error).__name__, file=sys.stderr)
-        result = 1
+        problems.add(type(error).__name__)
     finally:
-        print("notify: " + " ".join(f"{key}={value}" for key, value in counts.items()))
-    return result
+        if problems:
+            status = "error"
+        if args.send and status != "skipped":
+            time.sleep(max(0.0, SEND_SECONDS - (time.monotonic() - started)))
+        # 待ったあとにまとめて出す(途中で出すと、その行の時刻が残る)。
+        # 同じ種類は 1 回だけ出す(回数から通知の数が分からないようにする)。
+        for problem in sorted(problems):
+            print(problem, file=sys.stderr)
+        print("notify: " + status)
+    return int(status == "error")
 
 
 if __name__ == "__main__":

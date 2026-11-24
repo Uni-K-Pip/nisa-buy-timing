@@ -3,12 +3,28 @@ from datetime import date
 import json
 from pathlib import Path
 import subprocess
+from types import SimpleNamespace
 
 import pytest
 
+from nbt import notify
 from nbt.notify import crossed, main, notifications, signing_key
 from scripts import privacy_check
 from scripts.setup_push import encoded
+
+
+@pytest.fixture(autouse=True)
+def clock(monkeypatch, capsys):
+    """実際には待たない。sleep は偽の時計を進め、待つ前に出ていた出力を残す。"""
+    state = SimpleNamespace(now=1000.0, slept=[], printed_before_wait=[])
+
+    def sleep(seconds):
+        state.printed_before_wait.append("".join(capsys.readouterr()))
+        state.slept.append(seconds)
+        state.now += seconds
+
+    monkeypatch.setattr(notify, "time", SimpleNamespace(monotonic=lambda: state.now, sleep=sleep))
+    return state
 
 
 @pytest.fixture
@@ -53,40 +69,82 @@ def test_crossing_and_date_rules(sample):
     assert len(notifications(config["rules"], latest, date(2026, 12, 22))[1]) == 5
 
 
-def test_notify_only_logs_counts_and_exception_types(sample, tmp_path, monkeypatch, capsys):
+def test_notify_logs_only_the_outcome(sample, tmp_path, monkeypatch, capsys, clock):
     latest, config = sample
     (tmp_path / "latest.json").write_text(json.dumps(latest), encoding="utf-8")
     monkeypatch.setenv("PUSH_CONFIG", json.dumps(config))
     monkeypatch.setenv("VAPID_PRIVATE_KEY", "synthetic-test-secret")
     sent = []
+    failures = {1: "gone", 2: "os", 3: "os"}
+    pace = {"seconds": 1.5}
 
     class Gone(Exception):
         response = type("Response", (), {"status_code": 410})()
 
     def sender(**request):
         sent.append(request)
+        clock.now += pace["seconds"]
         assert request["ttl"] == 43_200
         assert request["vapid_claims"]["sub"].startswith("https://")
         print(request["subscription_info"], request["data"])
-        if len(sent) == 1:
+        failure = failures.get(len(sent))
+        if failure == "gone":
             raise Gone(str(request))
-        if len(sent) == 2:
+        if failure:
             raise OSError(str(request))
 
-    assert main(["--send", "--data", str(tmp_path)], sender=sender, today=date(2026, 12, 22)) == 1
+    def run(**options):
+        started = clock.now
+        code = main(["--send", "--data", str(tmp_path)], sender=sender, **options)
+        return code, clock.now - started
+
+    assert run(today=date(2026, 12, 22)) == (1, 20)
+    assert len(sent) == 6
     result = capsys.readouterr()
-    assert result.out == "notify: rules=6 triggered=6 sent=4 failed=1 expired=1\n"
-    assert result.err.splitlines() == ["Gone", "OSError"]
+    assert result.out == "notify: error\n"
+    # 失敗 3 件(期限切れ 1、OSError 2)でも、種類ごとに 1 行だけ。件数は出ない。
+    assert result.err.splitlines() == ["OSError", "expired"]
     for value in ("test-endpoint", "非公開テスト用ラベル", "synthetic-test-secret"):
         assert value not in result.out + result.err
 
+    # 通知を送った日と、条件を 1 つも満たさなかった日は、ログも所要時間も同じになる。
+    assert run(today=date(2026, 12, 22)) == (0, 20)
+    assert len(sent) == 12
+    sending_day = capsys.readouterr()
+    assert (sending_day.out, sending_day.err) == ("notify: ok\n", "")
+    quiet = {**config, "rules": {"funds": ["demo"], "score_at_least": 95}}
+    monkeypatch.setenv("PUSH_CONFIG", json.dumps(quiet))
+    assert run(today=date(2026, 12, 22)) == (0, 20)
+    assert len(sent) == 12
+    assert capsys.readouterr() == sending_day
+    assert clock.slept == [11, 11, 20]
+
+    # 送信が 20 秒を超えた日は、待たずに終える。
+    monkeypatch.setenv("PUSH_CONFIG", json.dumps(config))
+    pace["seconds"] = 5
+    assert run(today=date(2026, 12, 22)) == (0, 30)
+    assert capsys.readouterr() == sending_day
+
+    monkeypatch.setenv("PUSH_CONFIG", "{")
+    assert run() == (1, 20)
+    result = capsys.readouterr()
+    assert (result.out, result.err) == ("notify: error\n", "JSONDecodeError\n")
+    # ログの行は、待ったあとにまとめて出る(途中で出すと、その行の時刻が残る)。
+    assert clock.printed_before_wait == [""] * 5
+
+    # 送らない実行(朝でない、Secret がない)は待たない。
+    monkeypatch.setenv("PUSH_CONFIG", json.dumps(config))
     latest["run_kind"] = "evening"
     (tmp_path / "latest.json").write_text(json.dumps(latest), encoding="utf-8")
-    assert main(["--send", "--data", str(tmp_path)], sender=sender) == 0
-    assert len(sent) == 6
+    assert run() == (0, 0)
+    monkeypatch.delenv("PUSH_CONFIG")
+    assert run() == (0, 0)
+    assert len(sent) == 18
+    result = capsys.readouterr()
+    assert (result.out, result.err) == ("notify: skipped\n" * 2, "")
 
 
-def test_dry_run_writes_only_to_file_and_refuses_actions(sample, tmp_path, monkeypatch, capsys):
+def test_dry_run_writes_only_to_file_and_refuses_actions(sample, tmp_path, monkeypatch, capsys, clock):
     latest, config = sample
     (tmp_path / "latest.json").write_text(json.dumps(latest), encoding="utf-8")
     monkeypatch.setenv("PUSH_CONFIG", json.dumps(config))
@@ -95,13 +153,15 @@ def test_dry_run_writes_only_to_file_and_refuses_actions(sample, tmp_path, monke
     args = ["--dry-run", str(output), "--data", str(tmp_path)]
     assert main(args, today=date(2026, 12, 22)) == 0
     assert len(json.loads(output.read_text(encoding="utf-8"))) == 6
-    assert "非公開テスト用ラベル" not in capsys.readouterr().out
+    result = capsys.readouterr()
+    assert (result.out, result.err) == ("notify: ok\n", "")
     output.unlink()
     monkeypatch.setenv("GITHUB_ACTIONS", "true")
     assert main(args) == 1
     assert not output.exists()
     result = capsys.readouterr()
-    assert result.err == "PermissionError\n"
+    assert (result.out, result.err) == ("notify: error\n", "PermissionError\n")
+    assert clock.slept == []
 
 
 def test_vapid_signs_with_a_project_site_url():
