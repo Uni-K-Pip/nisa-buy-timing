@@ -287,9 +287,20 @@ tr > :first-child { text-align: left; }
 .chart-key { display: flex; gap: .45rem; align-items: center; }
 .dash-key { display: inline-block; width: 1.5rem; border-top: 2px dashed var(--warning); flex: none; }
 .verdict { border-inline-start: 4px solid var(--accent); }
-.verdict.warning { border-color: var(--warning); }
-.verdict > p { font-weight: 400; }
-.verdict > p:first-of-type { font-size: 1.02rem; }
+.verdict > .evidence-comparison:last-of-type { margin-bottom: .75rem; }
+.evidence-comparison { border-top: 1px solid var(--edge); margin-top: .75rem; padding-top: .75rem; }
+.evidence-comparison > :last-child { margin-bottom: 0; }
+.evidence-label { display: flex; flex-wrap: wrap; align-items: baseline; gap: .25rem .5rem; }
+.evidence-chip { background: var(--panel); color: var(--muted); }
+.evidence-chip.warning { background: var(--warning-bg); color: var(--warning); }
+.evidence-chip.candidate { color: var(--down); }
+.evidence-chip.confirmed { background: var(--soft); color: var(--accent); }
+.comparison-table :is(th, td) { white-space: normal; overflow-wrap: normal; }
+.comparison-table th:first-child { white-space: nowrap; }
+@media (max-width: 28rem) {
+  .comparison-table table { font-size: .8rem; }
+  .comparison-table :is(th, td) { padding-inline: .25rem; }
+}
 .zero-line { stroke: var(--ink); stroke-width: 2.5; }
 .interval-range { stroke: var(--zone-color); stroke-width: 2; }
 .interval-mean { fill: var(--zone-color); stroke: var(--surface); stroke-width: 1.25; }
