@@ -1,18 +1,20 @@
-const VERSION = "v0.1";
+const VERSION = "v0.2";
 const SHELL = "nbt-shell-" + VERSION;
 const DATA = "nbt-data-" + VERSION;
 const SCOPE = new URL(self.registration.scope);
 const SHELL_ASSETS = [
   "./index.html", "./styles.css", "./manifest.webmanifest", "./app-config.json",
   "./js/app.js", "./js/calendar.js", "./js/plan.js", "./js/storage.js", "./js/push.js",
-  "./js/ui.js", "./js/dashboard.js", "./js/plan-view.js", "./js/settings.js",
+  "./js/ui.js", "./js/visual.js", "./js/dashboard.js", "./js/chart.js", "./js/verify.js",
+  "./js/plan-view.js", "./js/settings.js",
   "./icons/icon-192.png", "./icons/icon-512.png", "./icons/apple-touch-icon.png",
 ];
 
 self.addEventListener("install", event => {
   event.waitUntil((async () => {
     const shell = await caches.open(SHELL);
-    await shell.addAll(SHELL_ASSETS);
+    // ブラウザの HTTP キャッシュを通すと、版を上げても古い殻を新しい版の名前で抱えてしまう。必ず取り直す。
+    await shell.addAll(SHELL_ASSETS.map(asset => new Request(asset, { cache: "reload" })));
     try {
       const data = await caches.open(DATA);
       await data.addAll(["./data/latest.json", "./data/calendar.json", "./data/push.json"]);

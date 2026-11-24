@@ -1,10 +1,9 @@
 import { parseDay } from "./calendar.js";
 import { allocateBudget, checkPlan } from "./plan.js";
-import { button, card, el, field, input, issueList, paragraph, select } from "./ui.js";
+import { bar, button, card, chip, details, el, emptyState, field, icon, input, installmentDots,
+  ISSUE_LABELS, isPurchased, issueList, number, paragraph, select, STATUS_LABELS, statusChip } from "./ui.js";
+import { shortDay } from "./visual.js";
 
-const STATUS_LABELS = [
-  ["planned", "予定"], ["ordered", "注文済み"], ["executed", "約定済み"], ["cancelled", "取消"],
-];
 const KINDS = [["index", "指数"], ["nav", "基準価額"]];
 
 function blankRow() {
@@ -58,7 +57,7 @@ function fields(...children) {
 }
 
 function editor(context, draft) {
-  const form = el("form", { class: "card" });
+  const form = el("form", { class: "card plan-editor", "aria-labelledby": "plan-editor-title" });
   const messages = el("div", { "aria-live": "polite" });
   const feedback = el("p", { class: "notice", role: "status", hidden: true });
   const plans = context.state.plans;
@@ -66,6 +65,8 @@ function editor(context, draft) {
   const fundItems = [["", "選択してください"], ...context.funds.map(fund => [fund.id, fund.name])];
   if (draft.fund_id && !fundItems.some(([id]) => id === draft.fund_id)) fundItems.push([draft.fund_id, draft.fund_id]);
   const note = text => { feedback.textContent = text; feedback.hidden = false; };
+  const sectionDetails = (label, children, key, open) =>
+    details(label, children, context.selection, "editor:" + draft.id + ":" + key, open);
 
   function showChecks(plan) {
     const fund = context.funds.find(item => item.id === plan.fund_id);
@@ -84,21 +85,47 @@ function editor(context, draft) {
     context.render();
   }
 
+  function distributeBudget() {
+    const current = readPlan(form, draft);
+    const active = current.installments.filter(row => row.status !== "cancelled");
+    const completed = active.filter(row => row.status !== "planned");
+    const remaining = active.filter(row => row.status === "planned");
+    const amounts = allocateBudget(current.budget === null ? null :
+      current.budget - completed.reduce((total, row) => total + (row.amount ?? 0), 0), remaining.length);
+    if (!amounts.length) {
+      note("予算と未注文の回を確認してください。");
+      return;
+    }
+    remaining.forEach((row, i) => { row.amount = amounts[i]; });
+    context.selection.draft = current;
+    context.render();
+  }
+
   function entry(row, i) {
     const key = row.id + "_";
-    const status = value => update(current => {
-      const item = current.installments.find(target => target.id === row.id);
-      item.status = value;
-      if (value === "ordered" && !item.order_date) item.order_date = context.today;
-    });
-    return el("fieldset", {}, el("legend", {}, (i + 1) + "回目"),
-      fields(dateField("予定日", key + "planned", row.planned_date),
-        numberField("金額（円）", key + "amount", row.amount, { max: Number.MAX_SAFE_INTEGER }),
-        field("状態", select(key + "status", STATUS_LABELS, row.status)),
-        dateField("注文日", key + "order", row.order_date),
+    const record = sectionDetails("注文と約定の記録", [
+      fields(dateField("注文日", key + "order", row.order_date),
         dateField("約定日（公式画面の値）", key + "trade", row.trade_date),
         dateField("受渡日（公式画面の値）", key + "settle", row.settle_date)),
       field("メモ", el("textarea", { name: key + "note", rows: 2 }, row.note)),
+    ], row.id, Boolean(row.order_date || row.trade_date || row.settle_date || row.note));
+    const status = value => {
+      // 自動で入る注文日と、これから手で入れる約定日・受渡日の欄を見えるようにしてから描き直す。
+      record.open = true;
+      update(current => {
+        const item = current.installments.find(target => target.id === row.id);
+        item.status = value;
+        if (value === "ordered" && !item.order_date) item.order_date = context.today;
+      });
+    };
+    const pill = el("span", {}, statusChip(row.status));
+    const statusControl = select(key + "status", STATUS_LABELS, row.status);
+    statusControl.addEventListener("change", () => pill.replaceChildren(statusChip(statusControl.value)));
+    return el("fieldset", {}, el("legend", {}, (i + 1) + "回目 ", pill),
+      el("div", { class: "fields installment-main" }, dateField("予定日", key + "planned", row.planned_date),
+        numberField("金額（円）", key + "amount", row.amount, { max: Number.MAX_SAFE_INTEGER }),
+        field("状態", statusControl)),
+      record,
       el("div", { class: "actions" },
         button("注文した", () => status("ordered")), button("約定した", () => status("executed")),
         button("この回を外す", () => update(current => {
@@ -107,45 +134,45 @@ function editor(context, draft) {
   }
 
   const title = draft.title || (existing ? "購入計画" : "新しい購入計画");
-  form.append(el("h2", {}, title),
-    fields(field("銘柄", select("fund_id", fundItems, draft.fund_id)),
-      field("計画名", input("title", draft.title, { maxlength: 100 })),
-      numberField("対象年", "year", draft.year, { min: 1900, max: 9999 }),
-      numberField("予算（円）", "budget", draft.budget, { max: Number.MAX_SAFE_INTEGER }),
-      numberField("検討するスコア", "threshold_score", draft.threshold_score, { max: 100 }),
-      numberField("前倒しを検討するスコア", "pull_forward_score", draft.pull_forward_score, { max: 100 }),
-      dateField("公式画面で確認した年内最終注文日", "official_last_order_date", draft.official_last_order_date),
-      numberField("その年の利用済み成長投資枠（円）", "nisa_used_this_year", draft.nisa_used_this_year,
-        { max: Number.MAX_SAFE_INTEGER })),
-    paragraph("公式の日付が空欄の場合は推定を使います。利用済み枠には、受渡済みの分を入力してください。", "secondary"),
+  const criteria = sectionDetails("③ 買う目安", [
+    fields(
+      el("div", {}, numberField("検討するスコア", "threshold_score", draft.threshold_score, { max: 100 }),
+        paragraph("スコアがこの値以上の日に買うことを検討します（既定70）。", "secondary")),
+      el("div", {}, numberField("前倒しを検討するスコア", "pull_forward_score", draft.pull_forward_score, { max: 100 }),
+        paragraph("スコアがこの値以上の日に次の回を早めることを検討します（既定85）。", "secondary"))),
     el("fieldset", {}, el("legend", {}, "価格の条件"),
+      paragraph("選んだ指数や基準価額がこの値以下かを確認できます。", "secondary"),
       ...draft.levels.map((level, i) => fields(field("対象", select("level_kind_" + i, KINDS, level.kind)),
         numberField("この値以下", "level_value_" + i, level.value, { step: "any" }),
         button("条件を外す", () => update(current => { current.levels.splice(i, 1); }), "danger"))),
       el("div", { class: "actions" }, button("価格の条件を追加", () => update(current => {
         current.levels.push({ kind: "index", op: "<=", value: null });
-      }))),
+      })))),
+    el("fieldset", {}, el("legend", {}, "下落率の条件"),
+      paragraph("選んだ指数や基準価額が、基準にする価格から指定の割合以上下がったかを確認できます。", "secondary"),
       fields(field("下落率の対象", select("drop_kind", [["", "使用しない"], ...KINDS], draft.drop_rule?.kind ?? "")),
         numberField("基準にする価格", "reference_value", draft.drop_rule?.reference_value, { step: "any" }),
         numberField("下落率（%）", "drop_pct", draft.drop_rule?.pct, { max: 100, step: "any" }))),
-    el("h3", {}, "購入予定と記録"),
-    el("div", { class: "actions" }, button("回を追加", () => update(current => { current.installments.push(blankRow()); })),
-      button("予算を各回に割り振る", () => {
-        const current = readPlan(form, draft);
-        const active = current.installments.filter(row => row.status !== "cancelled");
-        const completed = active.filter(row => row.status !== "planned");
-        const remaining = active.filter(row => row.status === "planned");
-        const amounts = allocateBudget(current.budget === null ? null :
-          current.budget - completed.reduce((total, row) => total + (row.amount ?? 0), 0), remaining.length);
-        if (!amounts.length) {
-          note("予算と未注文の回を確認してください。");
-          return;
-        }
-        remaining.forEach((row, i) => { row.amount = amounts[i]; });
-        context.selection.draft = current;
-        context.render();
-      })),
-    ...draft.installments.map(entry), messages, feedback,
+  ], "criteria", Boolean(draft.levels.length || draft.drop_rule ||
+    draft.threshold_score !== 70 || draft.pull_forward_score !== 85));
+  const yearEnd = sectionDetails("④ 年内の枠の確認", [
+    fields(dateField("公式画面で確認した年内最終注文日", "official_last_order_date", draft.official_last_order_date),
+      numberField("その年の利用済み成長投資枠（円）", "nisa_used_this_year", draft.nisa_used_this_year,
+        { max: Number.MAX_SAFE_INTEGER })),
+    paragraph("公式の日付が空欄の場合は推定を使います。利用済み枠には、受渡済みの分を入力してください。", "secondary"),
+  ], "year-end", Boolean(draft.official_last_order_date) || draft.nisa_used_this_year !== null);
+  form.append(el("h2", { id: "plan-editor-title", tabindex: "-1" }, title),
+    el("section", { class: "editor-section plan-basic" }, el("h3", {}, "① 基本"),
+      fields(field("銘柄", select("fund_id", fundItems, draft.fund_id)),
+        field("計画名", input("title", draft.title, { maxlength: 100 })),
+        numberField("対象年", "year", draft.year, { min: 1900, max: 9999 }),
+        numberField("予算（円）", "budget", draft.budget, { max: Number.MAX_SAFE_INTEGER }))),
+    el("section", { class: "editor-section" }, el("h3", {}, "② 買う日と金額"),
+      el("div", { class: "actions" },
+        button("回を追加", () => update(current => { current.installments.push(blankRow()); })),
+        button("予算を各回に割り振る", distributeBudget)),
+      ...draft.installments.map(entry)),
+    criteria, yearEnd, messages, feedback,
     el("div", { class: "actions" }, el("button", { type: "submit", class: "primary" }, "端末に保存"),
       button("編集を閉じる", () => { context.selection.draft = null; context.render(); }),
       existing ? button("計画を削除", () => {
@@ -161,17 +188,25 @@ function editor(context, draft) {
     context.selection.draft = current;
     showChecks(current);
   });
+  // Native validation needs the invalid control to be visible before focusing it.
+  form.addEventListener("invalid", event => {
+    const panel = event.target.closest("details");
+    if (panel) panel.open = true;
+  }, true);
   form.addEventListener("submit", event => {
     event.preventDefault();
     const plan = readPlan(form, draft);
-    const missingLevel = plan.levels.some(rule => !Number.isFinite(rule.value));
     const drop = plan.drop_rule;
-    if (!plan.fund_id || missingLevel || drop && (!Number.isFinite(drop.reference_value) || !Number.isFinite(drop.pct))) {
+    const missingPrice = plan.levels.some(rule => !Number.isFinite(rule.value)) ||
+      Boolean(drop && (!Number.isFinite(drop.reference_value) || !Number.isFinite(drop.pct)));
+    if (!plan.fund_id || missingPrice) {
+      if (missingPrice) criteria.open = true;
       note("銘柄を選び、追加した価格条件の値を入力してください。");
       return;
     }
     if (plan.official_last_order_date && (!plan.year || parseDay(plan.official_last_order_date) === null ||
         !plan.official_last_order_date.startsWith(String(plan.year) + "-"))) {
+      yearEnd.open = true;
       note("公式の最終注文日は、対象年の日付を入力してください。");
       return;
     }
@@ -189,21 +224,43 @@ function editor(context, draft) {
   return form;
 }
 
+function planCard(plan, context, edit) {
+  const fund = context.funds.find(item => item.id === plan.fund_id);
+  const completed = plan.installments.filter(isPurchased);
+  const spent = completed.reduce((sum, row) => sum + (row.amount ?? 0), 0);
+  const issues = checkPlan(plan, { ...context, fund });
+  const alerts = ["error", "warning"].map(type => {
+    const count = issues.filter(issue => issue.type === type).length;
+    return count ? chip(ISSUE_LABELS[type][1] + " " + count + "件", type) : null;
+  });
+  return card(el("div", { class: "section-heading" }, el("h2", {}, plan.title || "購入計画"),
+    button("編集", () => edit(plan))),
+    paragraph((fund?.name ?? plan.fund_id) + (plan.year ? " · " + plan.year + "年" : ""), "secondary"),
+    el("h3", {}, "進み具合"),
+    paragraph(plan.installments.length + "回中 " + completed.length + "回 注文済み（約定済みを含む）"),
+    installmentDots(plan.installments),
+    Number.isFinite(plan.budget) ? el("div", { class: "budget-progress" },
+      paragraph("注文済みの金額 " + number(spent, 0) + "円 ／ 予算 " + number(plan.budget, 0) + "円", "secondary"),
+      bar(plan.budget > 0 ? 100 * spent / plan.budget : spent > 0 ? 100 : 0)) : null,
+    el("ul", { class: "installment-list" }, ...plan.installments.map((row, i) => el("li", {},
+      el("span", {}, (i + 1) + "回目　" + shortDay(row.planned_date)),
+      el("strong", {}, Number.isFinite(row.amount) ? number(row.amount, 0) + "円" : "—"), statusChip(row.status)))),
+    el("div", { class: "chips" }, ...alerts));
+}
+
 export function renderPlans(context) {
   const edit = plan => {
     context.selection.draft = structuredClone(plan);
     context.render();
+    document.getElementById("plan-editor-title")?.focus();
   };
   return [
-    paragraph("予定と購入記録はこの端末に保存されます。", "secondary"),
+    el("p", { class: "icon-copy secondary" }, icon("lock"), "予定と購入記録はこの端末だけに保存されます。"),
     el("div", { class: "actions" }, context.funds.length ?
       button("新しい計画", () => edit(blankPlan()), "primary") : null),
-    ...context.state.plans.map(plan => {
-      const fund = context.funds.find(item => item.id === plan.fund_id);
-      return card(el("h2", {}, plan.title || "購入計画"),
-        paragraph((fund?.name ?? plan.fund_id) + (plan.year ? " · " + plan.year + "年" : "")),
-        button("この計画を編集", () => edit(plan)));
-    }),
+    !context.state.plans.length && !context.selection.draft ?
+      emptyState("calendar", "計画はまだありません", "買う日と金額を決めておくと、「今日」に次の回と注意が出ます。") : null,
+    ...context.state.plans.map(plan => planCard(plan, context, edit)),
     context.selection.draft ? editor(context, context.selection.draft) : null,
   ];
 }

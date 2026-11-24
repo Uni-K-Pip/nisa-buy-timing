@@ -1,6 +1,6 @@
 import { copyPayload, payloadHash, publicKeyBytes } from "./push.js";
 import { clearState, defaults, parseBackup } from "./storage.js";
-import { button, card, el, field, input, paragraph } from "./ui.js";
+import { button, card, checkboxRow, chip, el, field, icon, input, paragraph } from "./ui.js";
 
 function exportState(state) {
   const blob = new Blob([JSON.stringify(state, null, 2)], { type: "application/json" });
@@ -10,6 +10,13 @@ function exportState(state) {
   link.click();
   link.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function pushStep(number, title, badge, ...children) {
+  return el("li", { class: "push-step" },
+    el("div", { class: "section-heading" },
+      el("h3", {}, el("span", { class: "step-number" }, number), " ", title), badge),
+    ...children);
 }
 
 function pushSection(context) {
@@ -50,7 +57,7 @@ function pushSection(context) {
   function checkbox(label, key) {
     const element = input(key, "", { type: "checkbox", checked: rules[key] });
     element.addEventListener("change", () => { rules[key] = element.checked; applyRules(); });
-    return field(label, element);
+    return checkboxRow(label, element);
   }
 
   function numeric(label, key, range, factor = 1) {
@@ -152,25 +159,66 @@ function pushSection(context) {
   const github = typeof repo === "string" && /^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(repo)
     ? el("a", { href: "https://github.com/" + repo + "/settings/secrets/actions", target: "_blank", rel: "noopener noreferrer" },
       "GitHub の Actions Secrets を開く") : null;
-  return card(el("h2", {}, "通知"),
-    paragraph("iOS ではホーム画面に追加したアプリから通知を有効にしてください。"),
+  const subscriptionBadge = chip("確認中");
+  const ruleBadge = chip("");
+  const copyBadge = chip("");
+  function showRuleStatus() {
+    ruleBadge.textContent = rules.score_at_least !== null || rules.plan_prices ||
+      rules.plan_dates || rules.year_end || rules.ml_enabled ? "条件を選択済み" : "条件なし";
+  }
+  function showPushStatus() {
+    subscriptionBadge.textContent = !unsubscribe.disabled ? "購読済み" :
+      status.textContent === "購読の状態を確認しています。" ? "確認中" : "購読なし";
+    copyBadge.textContent = !context.state.push_hash ? "未コピー" : !remote.hidden ? "コピーし直す" :
+      remote.textContent ? "最後のコピーと一致" : "確認中";
+  }
+  const controls = el("div", {},
     el("div", { class: "fields" },
       numeric("通知するスコア（空欄で無効）", "score_at_least", 100),
       numeric("ML の確率がこの値以下（%）", "ml_probability", 100, 100)),
     checkbox("計画に登録した価格・下落率の条件", "plan_prices"),
     checkbox("購入予定日の前日と当日", "plan_dates"),
     checkbox("年内受渡の最終注文日まで5・1国内営業日", "year_end"),
-    checkbox("検証で有効な実験モデルの通知", "ml_enabled"),
-    status, remote, el("div", { class: "actions" }, subscribe, copy, unsubscribe),
-    paragraph("GitHub の Settings → Secrets and variables → Actions → New repository secret で名前を PUSH_CONFIG にし、コピーした設定を貼り付けます。"),
-    github, operation, output);
+    checkbox("検証で有効な実験モデルの通知", "ml_enabled"));
+  controls.addEventListener("change", showRuleStatus);
+  showRuleStatus();
+  showPushStatus();
+  const observer = new MutationObserver(showPushStatus);
+  observer.observe(unsubscribe, { attributes: true, attributeFilter: ["disabled"] });
+  observer.observe(status, { childList: true });
+  observer.observe(remote, { childList: true, attributes: true, attributeFilter: ["hidden"] });
+  context.renderSignal?.addEventListener("abort", () => observer.disconnect(), { once: true });
+  return card(el("h2", {}, "通知"),
+    el("ol", { class: "push-steps" },
+      pushStep("1", "この端末で通知を有効にする", subscriptionBadge, status,
+        el("div", { class: "actions" }, subscribe, unsubscribe),
+        paragraph("iOS ではホーム画面に追加したアプリから通知を有効にしてください。", "secondary")),
+      pushStep("2", "知らせてほしい条件を選ぶ", ruleBadge, controls),
+      pushStep("3", "設定をコピーして GitHub に登録する", copyBadge,
+        el("div", { class: "actions" }, copy),
+        paragraph("GitHub の Settings → Secrets and variables → Actions → New repository secret で名前を PUSH_CONFIG にし、コピーした設定を貼り付けます。"),
+        github ? el("p", { class: "action-link" }, github) : null,
+        paragraph("コピーされる内容に、金額と計画名は含まれません。予定日と価格の条件は含まれます。", "secondary"),
+        remote, operation, output)));
+}
+
+function dataLocations() {
+  const locations = [
+    ["device", "この端末だけ", "購入計画、金額、購入記録、ウォッチする銘柄、通知の条件。"],
+    ["globe", "だれでも見られる（公開）", "投信の価格、スコア、検証結果。どの利用者にも同じ内容で、あなたの情報は入りません。"],
+    ["lock", "あなたが GitHub に貼ったときだけ", "通知の購読情報と条件（金額と計画名は含みません）。GitHub の Secret として暗号化されます。"],
+  ];
+  return card(el("h2", {}, "データの置き場所"),
+    el("ul", { class: "data-locations" }, ...locations.map(([symbol, title, text]) =>
+      el("li", {}, icon(symbol), el("div", {}, el("strong", {}, title), paragraph(text))))),
+    paragraph("このアプリが行う通信は、表示用のデータの読み込みだけです（通知を有効にしたときは、端末の通知サービスへの登録が加わります）。解析タグや広告はありません。", "secondary"));
 }
 
 export function renderSettings(context) {
   const watch = card(el("h2", {}, "ウォッチする銘柄"));
   for (const fund of context.funds) {
     const control = input("watch", fund.id, { type: "checkbox", checked: context.state.watch.includes(fund.id) });
-    watch.append(field(fund.name, control));
+    watch.append(checkboxRow(fund.name, control));
     control.addEventListener("change", () => {
       context.state.watch = control.checked ? [...context.state.watch, fund.id] :
         context.state.watch.filter(id => id !== fund.id);
@@ -205,14 +253,19 @@ export function renderSettings(context) {
 
   const sources = context.latest?.sources ?? [];
   return [
-    watch, pushSection(context),
+    watch, pushSection(context), dataLocations(),
     card(el("h2", {}, "この端末のデータ"),
       el("div", { class: "actions" }, button("JSON に書き出す", () => exportState(context.state)), clear),
       field("書き出した JSON を読み込む", file), feedback),
     card(el("h2", {}, "アプリについて"),
-      button("注意書きを表示", context.showDisclaimer),
+      el("div", { class: "actions" }, button("注意書きを表示", context.showDisclaimer),
+        button("画面の見方を表示", () => {
+          context.state.guide_closed = false;
+          context.persist();
+          context.showTab("today");
+        })),
       el("h3", {}, "データ元"),
-      sources.length ? el("ul", {}, ...sources.map(source =>
+      sources.length ? el("ul", { class: "source-links" }, ...sources.map(source =>
         el("li", {}, el("a", { href: source.url, target: "_blank", rel: "noopener noreferrer" }, source.name))))
         : paragraph("データを取得すると表示します。")),
   ];
