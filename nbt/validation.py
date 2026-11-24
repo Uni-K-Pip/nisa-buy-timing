@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from . import macro
 from .stats import mean_interval, non_overlapping, stable_seed, summarize, t_interval
 
 REGISTRATION_PATH = Path(__file__).resolve().parents[1] / "config" / "validation.json"
@@ -14,19 +15,28 @@ REGISTRATION_PATH = Path(__file__).resolve().parents[1] / "config" / "validation
 def load_registration(registration=None):
     if registration is None:
         registration = json.loads(REGISTRATION_PATH.read_text(encoding="utf-8"))
+    if registration.get("schema") != 2:
+        raise ValueError("検証登録の schema が不明です")
     protocol = registration["protocol"]
     strategies = registration["strategies"]
-    if registration["schema"] != 1:
-        raise ValueError("検証登録の schema が不明です")
     if len(strategies) > protocol["max_concurrent_versions"]:
         raise ValueError("前向き検証の同時登録数が上限を超えています")
-    ids = [entry["id"] for entry in strategies]
-    if set(ids) - {"score", "ml"} or len(ids) != len(set(ids)):
-        raise ValueError("有効な登録はスコアとMLの各1版までです")
+    ids = [entry.get("id") for entry in strategies]
+    if any(not isinstance(name, str) or not name for name in ids) or len(ids) != len(set(ids)):
+        raise ValueError("検証登録の id が不正または重複しています")
     years = protocol["looks_years"]
     if not years or years != sorted(set(years)) or years[0] < protocol["min_forward_years"]:
         raise ValueError("検証登録の判定年が不正です")
     for entry in strategies:
+        kind = entry.get("kind")
+        if kind not in ("score", "ml"):
+            raise ValueError("検証登録の kind が不明です")
+        groups = entry.get("features")
+        if kind == "ml" and (
+            not isinstance(groups, list) or groups[:1] != ["base"]
+            or any(not isinstance(group, str) or group not in macro.FEATURE_SETS for group in groups[1:])
+        ):
+            raise ValueError("検証登録の features が不正です")
         date.fromisoformat(entry["registered"])
         primary = entry["primary"]
         if not 1 <= primary["count"] <= primary["window"]:
@@ -184,16 +194,41 @@ def _score_fingerprint(price, proxy, fx, vix, primary):
     }
 
 
-def _ml_fingerprint(price, fx, vix, primary):
+def _synthetic_macro(dates):
+    rng = np.random.default_rng(619)
+    return {
+        name: pd.Series(level + np.cumsum(rng.normal(0, scale, len(dates))), index=dates).drop(dates[gaps])
+        for name, level, scale, gaps in (
+            # 6 日以上続く抜け(古い値の打ち切りが効く)を、系列ごとに 1 つずつ入れる。
+            ("us10y", 3.5, 0.08, [10, 401, 683, *range(760, 767)]),
+            ("us3m", 1.5, 0.05, [9, 410, 520, 521, *range(1040, 1048)]),
+            ("dxy", 100, 0.3, [14, 416, 900, *range(1300, 1306)]),
+        )
+    }
+
+
+def _ml_fingerprint(price, fx, vix, primary, groups):
     from . import backtest, indicators, ml
 
     features = indicators.indicators(price, fx, vix)
+    extra = {}
+    if groups != ["base"]:
+        macro_features = macro.features(_synthetic_macro(price.index), price.index, groups[1:])
+        features = features.join(macro_features)
+        extra = {
+            "groups": groups,
+            "macro_values": [
+                [round(value, 8) if np.isfinite(value) else None for value in row]
+                for row in macro_features.to_numpy()
+            ],
+        }
     complete = np.isfinite(features.to_numpy()).all(axis=1)
     outcome = ml.targets(price).to_numpy()
     schedule = ml.training_schedule(complete, outcome)
     bounds = backtest.intervals(primary["window"], primary["count"])
     probabilities = np.random.default_rng(724).random(primary["window"])
     return {
+        **extra,
         "features": list(features.columns),
         "targets": [int(value) if np.isfinite(value) else None for value in outcome],
         "horizon": ml.HORIZON, "min_train": ml.MIN_TRAIN, "step": ml.STEP,
@@ -209,9 +244,9 @@ def _ml_fingerprint(price, fx, vix, primary):
 def fingerprint(entry):
     price, proxy, fx, vix = _synthetic_data()
     primary = entry["primary"]
-    if entry["id"] == "score":
+    if entry["kind"] == "score":
         content = _score_fingerprint(price, proxy, fx, vix, primary)
     else:
-        content = _ml_fingerprint(price, fx, vix, primary)
+        content = _ml_fingerprint(price, fx, vix, primary, entry["features"])
     payload = json.dumps({"primary": primary, **content}, sort_keys=True, allow_nan=False, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]

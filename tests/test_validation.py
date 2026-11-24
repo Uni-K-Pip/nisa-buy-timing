@@ -9,12 +9,37 @@ from nbt import backtest, validation
 
 def test_registered_fingerprints_and_limit():
     registration = validation.load_registration()
+    entries = {entry["id"]: entry for entry in registration["strategies"]}
+    assert set(entries) == {"ml-macro", "ml", "score"}
+    assert entries["score"]["fingerprint"] == "02600ec37d381f7b"
+    assert entries["ml"]["fingerprint"] == "da5f3baf8c273262"
+    assert {entry["registered"] for entry in entries.values()} == {"2026-11-25"}
     for entry in registration["strategies"]:
         assert entry["fingerprint"] == validation.fingerprint(entry)
     assert validation.judgment_level(registration["protocol"]) == 0.998
     registration["strategies"] *= 3
     with pytest.raises(ValueError, match="上限"):
         validation.load_registration(registration)
+
+
+@pytest.mark.parametrize(("change", "message"), [
+    ({"id": "ml"}, "id"), ({"kind": "unknown"}, "kind"), ({"features": ["base", "unknown"]}, "features"),
+    ({"features": ["rates_dollar", "base"]}, "features"), ({"features": []}, "features"),
+])
+def test_registration_rejects_invalid_strategy(change, message):
+    registration = validation.load_registration()
+    registration["strategies"][-1].update(change)
+    with pytest.raises(ValueError, match=message):
+        validation.load_registration(registration)
+
+
+def test_registration_rejects_old_schema_and_uses_kind_for_fingerprint():
+    registration = validation.load_registration()
+    with pytest.raises(ValueError, match="schema"):
+        validation.load_registration(registration | {"schema": 1})
+    score, base, _ = registration["strategies"]
+    assert validation.fingerprint(score | {"id": "another-score"}) == score["fingerprint"]
+    assert validation.fingerprint(base | {"id": "another-ml"}) == base["fingerprint"]
 
 
 def test_status_requires_margin_intervals_nav_and_judgment():

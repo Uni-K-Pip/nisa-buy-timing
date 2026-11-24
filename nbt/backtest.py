@@ -247,7 +247,26 @@ def _period_ranges(dates, starts):
     return periods
 
 
-def compare(price, signals, probabilities, *, fund, confirmed_scores=None, nav_start=None, registration=None, today=None):
+def _registered_evidence(entry, protocol, fills, signal, fund_id, nav_start, last, today, reason):
+    if reason is None and signal is not None:
+        kind, primary = entry["kind"], entry["primary"]
+        try:
+            threshold = primary["threshold" if kind == "score" else "probability_at_most"]
+            results = window_results(fills, signal, primary["window"], primary["count"], threshold, strategy=kind)
+            return validation.evidence(fund_id, entry, protocol, results, nav_start, last, today, COMPARISONS)
+        except Exception as error:
+            if entry["id"] in ("score", "ml"):
+                raise
+            reason = type(error).__name__
+    # 理由は呼び出し側が渡す(マクロ指標が取れない、など)。渡されなければ、計算していないとだけ記録する。
+    return {key: entry[key] for key in ("version", "registered", "primary")} | {
+        "looks": validation.look_schedule(pd.Timestamp(entry["registered"]).date(), protocol["looks_years"], today),
+        "comparisons": None, "unavailable": reason or "not_computed",
+    }
+
+
+def compare(price, signals, probabilities, *, fund, confirmed_scores=None, nav_start=None, registration=None, today=None,
+            registered_signals=None, unavailable=None):
     registration = validation.load_registration(registration)
     price = price.sort_index()
     last = price.index[-1]
@@ -258,14 +277,13 @@ def compare(price, signals, probabilities, *, fund, confirmed_scores=None, nav_s
     fund_id = fund["id"]
     protocol = registration["protocol"]
     grid = _grid(fills, signals, probabilities, start_dates, fund_id, protocol["bootstrap_draws"])
+    registered_signals = {"score": signals, "ml": probabilities} | (registered_signals or {})
+    unavailable = unavailable or {}
     strategies = {}
     for entry in registration["strategies"]:
-        strategy, primary = entry["id"], entry["primary"]
-        signal = signals if strategy == "score" else probabilities
-        threshold = primary.get("threshold") if strategy == "score" else primary["probability_at_most"]
-        results = window_results(fills, signal, primary["window"], primary["count"], threshold, strategy=strategy)
-        strategies[strategy] = validation.evidence(
-            fund_id, entry, protocol, results, nav_start, last, today, COMPARISONS,
+        strategy = entry["id"]
+        strategies[strategy] = _registered_evidence(
+            entry, protocol, fills, registered_signals.get(strategy), fund_id, nav_start, last, today, unavailable.get(strategy),
         )
     primary = next((entry["primary"] for entry in registration["strategies"] if entry["id"] == "score"),
                    {"window": 40, "count": 3, "threshold": 70})

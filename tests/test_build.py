@@ -1,11 +1,13 @@
 from datetime import datetime
 import json
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
 import requests
 
+from nbt import ledger, macro, ml
 from nbt.build import JST, build, clean
 from nbt.indicators import indicators
 from nbt.score import score_series, score_summary
@@ -14,10 +16,11 @@ from nbt.validation import load_registration
 
 
 class FakeSource:
-    def __init__(self, fail_nav=False, fail_index=False, estimate=True, fail_fx=False):
+    def __init__(self, fail_nav=False, fail_index=False, estimate=True, fail_fx=False, fail_macro=False):
         self.fail_nav = fail_nav
         self.fail_index = fail_index
         self.fail_fx = fail_fx
+        self.fail_macro = fail_macro
         end = "2026-11-20" if estimate else "2026-11-19"
         self.dates = pd.bdate_range("2025-04-01", end)
 
@@ -30,6 +33,12 @@ class FakeSource:
     def close(self, ticker):
         if self.fail_index and ticker == "^NYFANG":
             raise OSError
+        if ticker in {item["ticker"] for item in macro.SERIES.values()}:
+            if self.fail_macro and ticker == "DX-Y.NYB":
+                raise OSError
+            dates = pd.bdate_range("2024-01-04", self.dates[-1])
+            pattern = np.sin(np.arange(len(dates)) / 40)
+            return pd.Series({"^TNX": 4.2, "^IRX": -0.1, "DX-Y.NYB": 100.0}[ticker] + 0.05 * pattern, index=dates)
         assert ticker != "USDJPY=X"
         values = pd.Series(np.arange(100.0, 100.0 + len(self.dates)), index=self.dates)
         values.iloc[-2] *= 1.2
@@ -128,7 +137,7 @@ def test_fake_build_file_contract(tmp_path, monkeypatch, estimate):
                 assert all(set(period) == keys for period in item[strategy].values())
         evidence = backtest["evidence"]
         assert evidence["protocol"]["level"] == 0.998
-        assert evidence["strategies"].keys() == {"score", "ml"}
+        assert evidence["strategies"].keys() == {"score", "ml", "ml-macro"}
         for strategy in evidence["strategies"].values():
             assert strategy["looks"]["last"] is None
             assert strategy["comparisons"].keys() == {"regular", "lump", "placebo"}
@@ -137,6 +146,20 @@ def test_fake_build_file_contract(tmp_path, monkeypatch, estimate):
                 assert comparison["history"].keys() == basic | {"t_ci"}
                 assert comparison["forward"].keys() == basic | {"years"}
                 assert comparison["judgment"] is None
+
+        name = f"registered/{fund['id']}.json"
+        expected.add(name)
+        registered = read(name)
+        assert registered["schema"] == 1
+        assert registered["strategies"].keys() == evidence["strategies"].keys()
+        assert all(entry["available"] and entry["ledger"] is None and entry["decision"] is None
+                   for entry in registered["strategies"].values())
+        model = registered["strategies"]["ml-macro"]
+        assert model["features"] == ["base", "rates_dollar"]
+        assert model["feature_names"][-5:] == list(macro.RATES_DOLLAR_NAMES)
+        assert model["metrics"].keys() == ml.keys()
+        assert model["coverage"]["complete"] > 0
+        assert model["macro"]["us3m"]["last"] == source.dates[-1].date().isoformat()
 
         index = source.close(fund["proxy"]["index_ticker"])
         fx = source.fx("USDJPY=X")
@@ -231,3 +254,101 @@ def test_build_uses_injected_registration_and_now(tmp_path):
         else:
             assert result["look"] == "2026-11-24"
             assert result["level"] == 0.998
+
+
+def _small_build():
+    config = json.loads((Path("config") / "funds.json").read_text(encoding="utf-8"))
+    config["funds"] = config["funds"][:1]
+    registration = load_registration()
+    registration["protocol"]["bootstrap_draws"] = 8
+    return config, registration, config["funds"][0]["id"]
+
+
+def _outputs(folder):
+    return {path.relative_to(folder).as_posix(): path.read_bytes() for path in folder.rglob("*.json")}
+
+
+def _existing_outputs(files, fund_id):
+    backtest_name = f"backtest/{fund_id}.json"
+    backtest = json.loads(files[backtest_name])
+    backtest["evidence"]["strategies"].pop("ml-macro")
+    return {name: value for name, value in files.items() if name not in ("meta.json", backtest_name)
+            and not name.startswith("registered/")} | {backtest_name: backtest}
+
+
+def test_missing_macro_and_macro_exception_preserve_existing_outputs(tmp_path, monkeypatch):
+    config, registration, fund_id = _small_build()
+    now = datetime(2026, 11, 24, 9, tzinfo=JST)
+    out = tmp_path / "out"
+    build(out, FakeSource(), now, config=config, registration=registration)
+    reference = _existing_outputs(_outputs(out), fund_id)
+    assert json.loads((out / "meta.json").read_bytes())["macro"]["available"]
+
+    def check(reason):
+        files = _outputs(out)
+        assert _existing_outputs(files, fund_id) == reference
+        info = json.loads(files[f"registered/{fund_id}.json"])["strategies"]["ml-macro"]
+        assert not info["available"] and info["reason"] == reason
+        evidence = json.loads(files[f"backtest/{fund_id}.json"])["evidence"]["strategies"]["ml-macro"]
+        assert evidence["comparisons"] is None and evidence["unavailable"] == reason
+        assert json.loads(files["meta.json"])["macro"]["unavailable"][fund_id]["ml-macro"] == reason
+
+    with pytest.raises(ValueError, match="macro_unavailable"):
+        build(out, FakeSource(fail_macro=True), now, config=config, registration=registration, explore=tmp_path / "explore")
+    assert not (tmp_path / "explore").exists()
+    check("macro_unavailable")
+
+    def fail(*args, **kwargs):
+        raise RuntimeError
+
+    monkeypatch.setattr(macro, "features", fail)
+    build(out, FakeSource(), now, config=config, registration=registration)
+    check("RuntimeError")
+
+
+def test_ledger_opt_in_io_failure_and_exploration_isolation(tmp_path, monkeypatch):
+    config, registration, fund_id = _small_build()
+    monkeypatch.setattr(ml, "MIN_TRAIN", 20)
+    out, log, exploration = (tmp_path / name for name in ("out", "log", "explore"))
+    now = datetime(2026, 11, 24, 9, tzinfo=JST)
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("ledger I/O without --ledger")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ledger, "read", unexpected)
+        patch.setattr(ledger, "append", unexpected)
+        build(out, FakeSource(), now, config=config, registration=registration)
+        assert not log.exists()
+    base = _outputs(out)
+    assert "ledger" not in json.loads(base["meta.json"])
+    score = json.loads(base[f"registered/{fund_id}.json"])["strategies"]["score"]["decision"]
+    assert score["date"] == "2026-11-24" and score["status"] == "ok"
+    assert {"features", "inputs", "train"}.isdisjoint(score)
+
+    build(out, FakeSource(), now, config=config, registration=registration, ledger=log)
+    assert json.loads((out / "meta.json").read_bytes())["ledger"]["appended"] == 3
+    paths = sorted(log.rglob("*.jsonl"))
+    before_log = [path.read_bytes() for path in paths]
+    assert len(paths) == 3 and all(len(data.splitlines()) == 1 for data in before_log)
+    assert json.loads((out / f"registered/{fund_id}.json").read_bytes())["strategies"]["score"]["ledger"]["ok_days"] == 1
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ledger, "read", unexpected)
+        patch.setattr(ledger, "append", unexpected)
+        build(out, FakeSource(), now, config=config, registration=registration, explore=exploration)
+    assert _outputs(out) == base
+    assert [path.read_bytes() for path in paths] == before_log
+    assert {path.name for path in exploration.iterdir()} == {f"{fund_id}.json", "report.md"}
+    result = json.loads((exploration / f"{fund_id}.json").read_bytes())
+    assert result["kind"] == "exploration"
+    assert "探索の結果" in (exploration / "report.md").read_text(encoding="utf-8")
+
+    log_is_file = tmp_path / "unwritable-log"
+    log_is_file.touch()
+    build(out, FakeSource(), now, config=config, registration=registration, ledger=log_is_file)
+    files = _outputs(out)
+    assert _existing_outputs(files, fund_id) == _existing_outputs(base, fund_id)
+    state = json.loads(files["meta.json"])["ledger"]
+    assert not state["ok"] and state["appended"] == 0
+    assert state["errors"][fund_id].keys() == {"score", "ml", "ml-macro"}

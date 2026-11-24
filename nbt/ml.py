@@ -14,8 +14,8 @@ METRIC_SEED = stable_seed("ml", "metrics")
 INVALID_NOTE = "過去の検証では偶然と区別できません。参考にしないでください"
 
 
-def _label_delay(lag):
-    return lag + HORIZON - 1
+def _label_delay(lag, horizon=20):
+    return lag + horizon
 
 
 def targets(price, lag=1):
@@ -24,19 +24,24 @@ def targets(price, lag=1):
     return delayed.lt(immediate).astype(float).where(delayed.notna() & immediate.notna())
 
 
-def training_rows(complete, outcome, as_of, lag=1):
+def training_rows(complete, outcome, as_of, lag=1, horizon=20):
     # as_of の朝には as_of の価格がまだ出ていない。答えが as_of より前の価格だけで決まる行に限る。
-    stop = max(0, as_of - _label_delay(lag))
+    stop = max(0, as_of - _label_delay(lag, horizon))
     return np.flatnonzero(complete[:stop] & np.isfinite(outcome[:stop]))
 
 
-def training_schedule(complete, outcome, lag=1):
+def _first_training_day(complete, outcome, lag, horizon):
+    delay = _label_delay(lag, horizon)
+    if MIN_TRAIN == 0:
+        return delay
+    eligible = np.flatnonzero(complete & np.isfinite(outcome))
+    return eligible[MIN_TRAIN - 1] + delay + 1 if len(eligible) >= MIN_TRAIN else None
+
+
+def training_schedule(complete, outcome, lag=1, horizon=20):
     end = len(complete)
-    first = next((
-        as_of for as_of in range(MIN_TRAIN + _label_delay(lag), end)
-        if len(training_rows(complete, outcome, as_of, lag)) >= MIN_TRAIN
-    ), end)
-    return range(first, end, STEP)
+    first = _first_training_day(complete, outcome, lag, horizon)
+    return range(end if first is None else min(first, end), end, STEP)
 
 
 def make_model():
@@ -157,6 +162,49 @@ def _latest_probabilities(price, inputs, values, outcome, complete, lag):
     return probabilities[1], probabilities[0]
 
 
+def walk_forward(outcome, values, inputs, complete, predictable, lag, horizon, make_model, *, binary=True, confirmed=None):
+    predicted = np.full(len(outcome), np.nan)
+    baseline = predicted.copy()
+    for as_of in training_schedule(complete, outcome, lag, horizon):
+        rows = training_rows(complete, outcome, as_of, lag, horizon)
+        if make_model is None:
+            model = fit(values, outcome, rows)
+        else:
+            if binary and np.unique(outcome[rows]).size < 2:
+                continue
+            model = make_model().fit(values[rows], outcome[rows])
+        predict = np.flatnonzero(predictable[as_of:as_of + STEP]) + as_of
+        if model is None or not predict.size:
+            continue
+        predicted[predict] = model.predict_proba(inputs[predict])[:, 1] if binary else model.predict(inputs[predict])
+        baseline[predict] = outcome[rows].mean()
+        if confirmed is not None:
+            paired = predict[complete[predict]]
+            if paired.size:
+                confirmed[paired] = model.predict_proba(values[paired])[:, 1]
+    return predicted, baseline
+
+
+def decision_probability(price, features, decision, day, lag=1):
+    values = features.reindex(price.index).to_numpy(dtype=float)
+    inputs = decision.reindex([day]).to_numpy(dtype=float)
+    if not np.isfinite(inputs).all():
+        return None, 0, None, "features_incomplete"
+    complete = np.isfinite(values).all(axis=1)
+    outcome = targets(price, lag).to_numpy()
+    n = price.index.searchsorted(day)
+    first = _first_training_day(complete, outcome, lag, 20)
+    if first is None or first > n:
+        return None, 0, None, "model_unavailable"
+    as_of = first + (n - first) // STEP * STEP
+    rows = training_rows(complete, outcome, as_of, lag)
+    model = fit(values, outcome, rows)
+    last = price.index[rows[-1]].date().isoformat() if len(rows) else None
+    if model is None:
+        return None, len(rows), last, "model_unavailable"
+    return model.predict_proba(inputs)[0, 1], len(rows), last, None
+
+
 def experiment(price, features, decision=None, *, lag=1, registered=None, nav_start=None, latest_basis="confirmed"):
     decision = features if decision is None else decision
     values = features.to_numpy(dtype=float)
@@ -164,19 +212,8 @@ def experiment(price, features, decision=None, *, lag=1, registered=None, nav_st
     complete = np.isfinite(values).all(axis=1)
     predictable = np.isfinite(inputs).all(axis=1)
     outcome = targets(price, lag).to_numpy()
-    predicted = np.full(len(price), np.nan)
-    confirmed = predicted.copy()
-    baseline = predicted.copy()
-    for as_of in training_schedule(complete, outcome, lag):
-        rows = training_rows(complete, outcome, as_of, lag)
-        model = fit(values, outcome, rows)
-        predict = np.flatnonzero(predictable[as_of:as_of + STEP]) + as_of
-        if model is not None and predict.size:
-            predicted[predict] = model.predict_proba(inputs[predict])[:, 1]
-            baseline[predict] = outcome[rows].mean()
-            paired = predict[complete[predict]]
-            if nav_start is not None and paired.size:
-                confirmed[paired] = model.predict_proba(values[paired])[:, 1]
+    confirmed = np.full(len(price), np.nan) if nav_start is not None else None
+    predicted, baseline = walk_forward(outcome, values, inputs, complete, predictable, lag, 20, None, confirmed=confirmed)
 
     tested = np.isfinite(predicted) & np.isfinite(outcome)
     metrics = evaluate(outcome[tested], predicted[tested], baseline[tested])
