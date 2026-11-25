@@ -1,5 +1,6 @@
-from datetime import date, timedelta
+from datetime import date, time, timedelta
 from functools import cache
+from zoneinfo import ZoneInfo
 
 import holidays
 
@@ -32,6 +33,15 @@ def add_business_days(day, count, market="JP"):
         while not is_business_day(day, market):
             day += step
     return day
+
+
+def latest_us_session(now):
+    """通常取引が終わっている最後の NYSE の営業日(3.3)。"""
+    local = now.astimezone(ZoneInfo("America/New_York"))
+    day = local.date()
+    if is_business_day(day, "NYSE") and local.time() >= time(16):
+        return day
+    return add_business_days(day, -1, "NYSE")
 
 
 def business_days_between(start, end):

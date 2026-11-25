@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 
 from . import backtest, indicators, ledger as forward_log, macro, ml, score, validation
-from .calendar import export_calendar
+from .calendar import export_calendar, latest_us_session
 from .fetch import DataSource
 from .ledger import JST
 from .series import _domestic_range, domestic_dates, estimated_series, latest_estimate, nowcast, price_series, remove_fx_outliers
@@ -27,7 +27,7 @@ FRACTION_KEYS = {
     "auc", "brier", "baseline_brier", "brier_skill", "probability", "previous_probability",
     "ml_probability_at_most", "ml_prob", "lower", "upper", "mean_probability", "observed_rate",
     "auc_ci", "brier_skill_ci", "auc_confirmed", "auc_estimate", "brier_skill_confirmed",
-    "brier_skill_estimate", "prob_abs_diff_mean", "prob_abs_diff_p95", "probability_at_most", "level", "signal",
+    "brier_skill_estimate", "prob_abs_diff_mean", "prob_abs_diff_p95", "probability_at_most", "level", "signal", "close",
 }
 
 
@@ -166,6 +166,8 @@ def _write_exploration(folder, datasets, macro_series, run, draws):
 def build(out, source=None, now=None, run_kind="manual", config=None, registration=None, ledger=None, explore=None):
     source = DataSource() if source is None else source
     now = datetime.now(JST) if now is None else now.astimezone(JST)
+    expected_us_date = latest_us_session(now).isoformat()
+    latest_close = {"expected_us_date": expected_us_date, "filled": {}, "unfilled": {}, "stale": {}}
     if config is None:
         config = json.loads((ROOT / "config/funds.json").read_text(encoding="utf-8"))
     registration = validation.load_registration(registration)
@@ -199,6 +201,9 @@ def build(out, source=None, now=None, run_kind="manual", config=None, registrati
                 market[ticker] = values
             except Exception:
                 market[ticker] = pd.Series(dtype=float, index=pd.DatetimeIndex([]))
+            note = getattr(source, "close_notes", {}).get(ticker)
+            if note is not None:
+                latest_close[note["status"]][ticker] = {key: value for key, value in note.items() if key != "status"}
         return market[ticker]
 
     def fx_quotes(ticker):
@@ -217,6 +222,7 @@ def build(out, source=None, now=None, run_kind="manual", config=None, registrati
     vix = close("^VIX")
     macro_series = {name: close(info["ticker"], allow_nonpositive=info.get("allow_nonpositive", False))
                     for name, info in macro.SERIES.items()}
+    shared_tickers = ("^VIX", *(info["ticker"] for info in macro.SERIES.values()))
     for fund in config["funds"]:
         fund_id = fund["id"]
         nav = pd.DataFrame(columns=["nav", "distribution"], index=pd.DatetimeIndex([]), dtype=float)
@@ -226,7 +232,8 @@ def build(out, source=None, now=None, run_kind="manual", config=None, registrati
             except Exception:
                 pass
         proxy_cfg = fund.get("proxy", {})
-        index = close(proxy_cfg.get("index_ticker"))
+        index_ticker = proxy_cfg.get("index_ticker")
+        index = close(index_ticker)
         fx = fx_quotes(proxy_cfg.get("fx_ticker"))
         price, nav, proxy_jp, daily_fx, nav_start = price_series(nav, index, fx)
         if price.empty:
@@ -284,13 +291,19 @@ def build(out, source=None, now=None, run_kind="manual", config=None, registrati
 
         nav_quote = quote(nav["nav"])
         index_quote = quote(index)
+        if index_quote is not None and index_quote["date"] < expected_us_date:
+            index_date = index_quote["date"]
+            status["warnings"].append(
+                f"指数の直近の終値({expected_us_date})を取得できませんでした。{index_date} までの値で計算しています。"
+            )
+            latest_close["stale"][index_ticker] = index_date
         fx_quote = quote(fx["close"].dropna())
         latest.append({
             **{key: fund[key] for key in ("id", "name", "short_name")},
             "series_kind": "nav" if has_nav else "proxy", "nav": nav_quote,
             "nowcast": nowcast(nav, proxy_jp, index),
             "proxy": {
-                "index_ticker": proxy_cfg.get("index_ticker"), "index_label": proxy_cfg.get("index_label"),
+                "index_ticker": index_ticker, "index_label": proxy_cfg.get("index_label"),
                 "index": index_quote, "fx": fx_quote,
             },
             "score": score_info,
@@ -314,6 +327,9 @@ def build(out, source=None, now=None, run_kind="manual", config=None, registrati
         }
         input_dates = {"nav": _last_date(nav), "index": _last_date(index), "fx": _last_date(fx), "vix": _last_date(vix),
                        **{name: _last_date(values) for name, values in macro_series.items()}}
+        filled_tickers = [ticker for ticker in (index_ticker, *shared_tickers) if ticker in latest_close["filled"]]
+        if filled_tickers:
+            input_dates["filled"] = filled_tickers
         variants = {}
         signals, unavailable = {}, {}
         for entry in registration["strategies"]:
@@ -374,6 +390,7 @@ def build(out, source=None, now=None, run_kind="manual", config=None, registrati
         "meta.json": {
             "generated_at": stamp, "run_kind": run_kind,
             "market_dates": {ticker: _last_date(values) for ticker, values in market_quotes.items()},
+            "latest_close": latest_close,
             "macro": {"available": macro_available, "series": macro.metadata(macro_series),
                       "unavailable": macro_errors},
             "funds": [{

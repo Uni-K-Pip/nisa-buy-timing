@@ -16,12 +16,12 @@ from nbt.validation import load_registration
 
 
 class FakeSource:
-    def __init__(self, fail_nav=False, fail_index=False, estimate=True, fail_fx=False, fail_macro=False):
+    def __init__(self, fail_nav=False, fail_index=False, estimate=True, fail_fx=False, fail_macro=False, market_end=None):
         self.fail_nav = fail_nav
         self.fail_index = fail_index
         self.fail_fx = fail_fx
         self.fail_macro = fail_macro
-        end = "2026-11-20" if estimate else "2026-11-19"
+        end = market_end or ("2026-11-20" if estimate else "2026-11-19")
         self.dates = pd.bdate_range("2025-04-01", end)
 
     def nav(self, fund):
@@ -53,6 +53,13 @@ class FakeSource:
         opening[-3] *= 1.2
         closing[-2] *= 1.2
         return pd.DataFrame({"open": opening, "close": closing}, index=self.dates)
+
+
+class DecisionSource(FakeSource):
+    def nav(self, fund):
+        frame = super().nav(fund)
+        frame["nav"] = 1000 + 100 * np.sin(np.arange(len(frame)) / 12)
+        return frame
 
 
 @pytest.mark.parametrize("estimate", [True, False])
@@ -256,9 +263,9 @@ def test_build_uses_injected_registration_and_now(tmp_path):
             assert result["level"] == 0.998
 
 
-def _small_build():
+def _small_build(fund_indices=(0,)):
     config = json.loads((Path("config") / "funds.json").read_text(encoding="utf-8"))
-    config["funds"] = config["funds"][:1]
+    config["funds"] = [config["funds"][index] for index in fund_indices]
     registration = load_registration()
     registration["protocol"]["bootstrap_draws"] = 8
     return config, registration, config["funds"][0]["id"]
@@ -352,3 +359,129 @@ def test_ledger_opt_in_io_failure_and_exploration_isolation(tmp_path, monkeypatc
     state = json.loads(files["meta.json"])["ledger"]
     assert not state["ok"] and state["appended"] == 0
     assert state["errors"][fund_id].keys() == {"score", "ml", "ml-macro"}
+
+
+@pytest.mark.parametrize(("jst_day", "market_end", "expected", "warnings"), [
+    (25, "2026-11-23", "2026-11-24",
+     ["指数の直近の終値(2026-11-24)を取得できませんでした。2026-11-23 までの値で計算しています。"]),
+    (25, "2026-11-24", "2026-11-24", []),
+    (27, "2026-11-25", "2026-11-25", []),
+])
+def test_build_stale_index_warning(tmp_path, monkeypatch, jst_day, market_end, expected, warnings):
+    config, registration, _ = _small_build()
+    ticker = config["funds"][0]["proxy"]["index_ticker"]
+    monkeypatch.setattr(ml, "MIN_TRAIN", 20)
+    build(tmp_path, FakeSource(market_end=market_end), datetime(2026, 11, jst_day, 9, tzinfo=JST),
+          config=config, registration=registration)
+
+    latest = json.loads((tmp_path / "latest.json").read_bytes())
+    assert latest["funds"][0]["status"]["warnings"] == warnings
+    meta = json.loads((tmp_path / "meta.json").read_bytes())
+    assert meta["latest_close"] == {
+        "expected_us_date": expected, "filled": {}, "unfilled": {}, "stale": {ticker: market_end} if warnings else {},
+    }
+
+
+def test_one_stale_index_preserves_other_fund_outputs(tmp_path, monkeypatch):
+    config, registration, stale_id = _small_build((0, 1))
+    stale_fund, fresh_fund = config["funds"]
+    stale_ticker = stale_fund["proxy"]["index_ticker"]
+    fresh_id = fresh_fund["id"]
+    fresh_ticker = fresh_fund["proxy"]["index_ticker"]
+    now = datetime(2026, 11, 25, 9, tzinfo=JST)
+    monkeypatch.setattr(ml, "MIN_TRAIN", 20)
+    out, logs = tmp_path / "out", tmp_path / "logs"
+
+    class OneStaleIndex(DecisionSource):
+        def close(self, ticker):
+            values = super().close(ticker)
+            return values.iloc[:-1] if ticker == stale_ticker else values
+
+    def with_shared_notes(source):
+        source.close_notes = {
+            ticker: {
+                "status": "filled", "date": "2026-11-24", "close": source.close(ticker).iloc[-1],
+                "source": "regularMarketPrice", "price_time": "2026-11-24T16:00:01-05:00",
+                "fetched_at": now.isoformat(timespec="seconds"),
+            }
+            for ticker in ("DX-Y.NYB", "^TNX", "^VIX", fresh_ticker)
+        }
+        return source
+
+    build(out, with_shared_notes(DecisionSource(market_end="2026-11-24")), now,
+          config=config, registration=registration)
+    reference = _outputs(out)
+    build(out, with_shared_notes(OneStaleIndex(market_end="2026-11-24")), now,
+          config=config, registration=registration, ledger=logs)
+    files = _outputs(out)
+
+    stale, fresh = json.loads(files["latest.json"])["funds"]
+    assert stale["id"] == stale_id
+    assert stale["status"]["warnings"] == [
+        "指数の直近の終値(2026-11-24)を取得できませんでした。2026-11-23 までの値で計算しています。",
+    ]
+    assert fresh == json.loads(reference["latest.json"])["funds"][1]
+    for kind in ("series", "backtest", "ml"):
+        name = f"{kind}/{fresh_id}.json"
+        assert files[name] == reference[name]
+    for entry in registration["strategies"]:
+        stale_row = json.loads(ledger.path_for(logs, entry, stale_fund).read_bytes())
+        assert (stale_row["status"], stale_row["reason"]) == ("missing", "no_estimate")
+        assert stale_row["inputs"]["index"] == "2026-11-23"
+        fresh_row = json.loads(ledger.path_for(logs, entry, fresh_fund).read_bytes())
+        assert (fresh_row["status"], fresh_row["reason"]) == ("ok", None)
+        assert fresh_row["inputs"]["filled"] == [fresh_ticker, "^VIX", "^TNX", "DX-Y.NYB"]
+
+
+def test_build_records_close_notes_and_preserves_ledger_on_rerun(tmp_path, monkeypatch):
+    config, registration, _ = _small_build((0, 2))
+    unfilled_fund, filled_fund = config["funds"]
+    ticker = filled_fund["proxy"]["index_ticker"]
+    now = datetime(2026, 11, 25, 9, tzinfo=JST)
+    monkeypatch.setattr(ml, "MIN_TRAIN", 20)
+    out, logs = tmp_path / "out", tmp_path / "logs"
+    common = {"date": "2026-11-24", "fetched_at": now.isoformat(timespec="seconds")}
+    filled = dict(common, close=148.14286, source="regularMarketPrice", price_time="2026-11-24T16:00:01-05:00")
+    unfilled = dict(common, reason="date_mismatch")
+
+    class WithCloseNotes(DecisionSource):
+        def __init__(self, corrected=False):
+            super().__init__(market_end="2026-11-24")
+            self.corrected = corrected
+            self.close_notes = {"^IRX": dict(unfilled, status="unfilled")}
+            if not corrected:
+                self.close_notes[ticker] = dict(filled, status="filled")
+            self.close_notes["OTHER"] = dict(filled, status="filled")
+
+        def close(self, symbol):
+            values = super().close(symbol)
+            if symbol == ticker:
+                values *= 148 / values.iloc[-1]
+                values.iloc[-1] = 148.5 if self.corrected else filled["close"]
+            elif symbol == "^IRX":
+                values = values.iloc[:-1]
+            return values
+
+    build(out, WithCloseNotes(), now, config=config, registration=registration, ledger=logs)
+    files = _outputs(out)
+    meta = json.loads(files["meta.json"])
+    assert meta["latest_close"] == {
+        "expected_us_date": "2026-11-24", "filled": {ticker: dict(filled, close=148.1429)},
+        "unfilled": {"^IRX": unfilled}, "stale": {},
+    }
+    before = {path.relative_to(logs): path.read_bytes() for path in logs.rglob("*.jsonl")}
+    assert len(before) == meta["ledger"]["appended"] == 6
+    for entry in registration["strategies"]:
+        row = json.loads(before[ledger.path_for(logs, entry, filled_fund).relative_to(logs)])
+        assert row["status"] == "ok"
+        assert row["inputs"]["filled"] == [ticker]
+        other_row = json.loads(before[ledger.path_for(logs, entry, unfilled_fund).relative_to(logs)])
+        assert "filled" not in other_row["inputs"]
+
+    build(out, WithCloseNotes(corrected=True), now, config=config, registration=registration, ledger=logs)
+    after = _outputs(out)
+    assert json.loads(after["latest.json"])["funds"][1]["proxy"]["index"]["value"] == 148.5
+    meta = json.loads(after["meta.json"])
+    assert meta["latest_close"]["filled"] == {}
+    assert meta["ledger"]["appended"] == 0
+    assert {path.relative_to(logs): path.read_bytes() for path in logs.rglob("*.jsonl")} == before
