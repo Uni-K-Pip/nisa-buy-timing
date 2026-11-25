@@ -6,7 +6,7 @@ import pytest
 
 from nbt.backtest import average_cost, compare, decision_days, intervals
 from nbt.build import JST
-from nbt.calendar import add_business_days, is_business_day, is_order_day
+from nbt.calendar import add_business_days, is_business_day, is_order_day, latest_us_session
 from nbt.fetch import DataSource, parse_nav
 from nbt.indicators import decision_indicators, indicators, wilder_rsi
 from nbt.score import category, decision_score_series, score_series
@@ -45,6 +45,21 @@ def test_order_calendar_and_cutoff():
         {"order_date": "2026-12-24", "trade_date": "2026-12-25", "settle_date": "2027-01-04"},
         {"order_date": "2026-12-28", "trade_date": "2026-12-29", "settle_date": "2027-01-06"},
     ]
+
+
+@pytest.mark.parametrize(("local", "expected"), [
+    ("2026-11-25T11:00", "2026-11-24"),
+    ("2026-11-25T05:30", "2026-11-23"),
+    ("2026-11-25T06:00", "2026-11-24"),
+    ("2026-11-27T07:30", "2026-11-25"),
+    ("2026-11-30T07:30", "2026-11-27"),
+    ("2026-07-07T05:30", "2026-07-06"),
+    ("2026-07-07T04:30", "2026-07-02"),
+    ("2026-11-24T21:30", "2026-11-23"),
+])
+def test_latest_us_session(local, expected):
+    now = datetime.fromisoformat(local).replace(tzinfo=JST)
+    assert latest_us_session(now) == date.fromisoformat(expected)
 
 
 def test_csv_cp932_and_distribution():
