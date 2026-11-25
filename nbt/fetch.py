@@ -71,3 +71,26 @@ class DataSource:
             return close
 
         return retry(download)
+
+    def fx(self, ticker):
+        import yfinance as yf
+        from curl_cffi.requests import Session
+
+        def download():
+            with Session(impersonate="chrome", headers={"User-Agent": USER_AGENT}) as session:
+                prices = yf.download(
+                    ticker, period="max", auto_adjust=False, progress=False,
+                    threads=False, timeout=30, session=session,
+                )
+            if prices.empty:
+                raise ValueError("empty market series")
+            opening, closing = prices["Open"], prices["Close"]
+            if isinstance(opening, pd.DataFrame):
+                opening, closing = opening[ticker], closing[ticker]
+            values = pd.DataFrame({"open": opening, "close": closing}).dropna().sort_index()
+            values = values.loc[values.gt(0).all(axis=1)]
+            if values.empty:
+                raise ValueError("empty market FX")
+            return values
+
+        return retry(download)

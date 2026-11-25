@@ -1,4 +1,6 @@
-import { clampPercent, ZONES } from "./visual.js";
+import { clampPercent, number, ZONES } from "./visual.js";
+
+export { number, percent, probability } from "./visual.js";
 
 export function el(tag, attributes = {}, ...children) {
   const node = document.createElement(tag);
@@ -109,11 +111,7 @@ export function issueList(issues) {
   }));
 }
 
-export const number = (value, digits = 2) => Number.isFinite(value)
-  ? value.toLocaleString("ja-JP", { maximumFractionDigits: digits }) : "—";
-export const percent = (value, signed = false) => Number.isFinite(value)
-  ? (signed && value > 0 ? "+" : "") + number(value) + "%" : "—";
-export const probability = value => Number.isFinite(value) ? percent(value * 100) : "—";
+export const MODEL_VALID_NOTE = "予測指標の基準を満たしています。購入判定に使うには、この予測を使う買い方が確認済みになる必要があります。";
 
 export const chip = (text, className = "") => el("span", { class: "chip " + className }, text);
 export const zonePill = zone => chip(zone?.name ?? "算出できません", "zone-pill " + (zone?.key ?? "no-zone"));

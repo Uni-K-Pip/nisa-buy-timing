@@ -17,6 +17,23 @@ export const clampPercent = value => Math.max(0, Math.min(100, value));
 // 画面の整数は切り捨てる。四捨五入だと 79.6 が「80」と「割安寄り」になり、区分の下限(80)と食い違う。
 export const displayScore = score => Number.isFinite(score) ? String(Math.floor(clampPercent(score))) : "—";
 
+export function number(value, digits = 2) {
+  if (!Number.isFinite(value)) return "—";
+  const text = value.toLocaleString("ja-JP", { maximumFractionDigits: digits });
+  // 丸めて 0 になった負の値を「-0」と出さない。
+  return text === "-0" ? "0" : text;
+}
+export const percent = (value, signed = false) => Number.isFinite(value)
+  ? (signed && value > 0 ? "+" : "") + number(value) + "%" : "—";
+export const probability = value => Number.isFinite(value) ? percent(value * 100) : "—";
+export const signedPercent = value => percent(value, true);
+// 数値と単位のあいだで折り返さないよう、改行しない空白(U+00A0)でつなぐ。
+const NO_BREAK_SPACE = String.fromCharCode(0xa0);
+export const percentagePoints = (value, signed = false) => Number.isFinite(value)
+  ? (signed && value > 0 ? "+" : "") + number(value) + NO_BREAK_SPACE + "pt" : "—";
+export const signedPoints = value => percentagePoints(value, true);
+export const modelMetric = value => number(value, 4);
+
 export function gaugePoint(score, cx, cy, r) {
   if (![score, cx, cy, r].every(Number.isFinite) || r < 0) return null;
   const angle = Math.PI * (clampPercent(score) / 100);
@@ -125,4 +142,43 @@ export function elementName(key) {
 
 export function zoneDescription(zone) {
   return zone?.comparison ? `過去5年のこの投信の中で、${zone.comparison}水準です。` : "スコアを算出できません。";
+}
+
+const EVIDENCE_STATUSES = new Map([
+  ["unconfirmed", { label: "有効性未確認", tone: "neutral",
+    description: "過去データでは、偶然と区別できる差を確認できていません。" }],
+  ["unfavorable", { label: "過去は不利", tone: "warning",
+    description: "過去データでは、平均で高く買う結果でした（95% 区間がゼロより上）。" }],
+  ["candidate", { label: "候補", tone: "candidate",
+    description: "過去データでは基準を満たしました。条件を固定したあとのデータで確認中です。" }],
+  ["confirmed", { label: "確認済み", tone: "confirmed",
+    description: "条件を固定したあとのデータでも基準を満たしました。" }],
+]);
+
+export function evidenceStatus(status) {
+  return EVIDENCE_STATUSES.get(status) ?? null;
+}
+
+export function intervalText(bounds, format = number) {
+  if (!Array.isArray(bounds) || bounds.length !== 2) return "—";
+  const [lower, upper] = bounds;
+  if (!Number.isFinite(lower) || !Number.isFinite(upper) || lower > upper) return "—";
+  return format(lower) + " 〜 " + format(upper);
+}
+
+export function isPrimaryCondition(row, primary) {
+  return ["window", "count", "threshold"].every(key => Number.isFinite(primary?.[key]) && row?.[key] === primary[key]);
+}
+
+export function evidenceHeading(comparisons) {
+  const lump = comparisons?.lump?.status;
+  if (lump === "confirmed") return "一括より有利（確認済み）";
+  if (comparisons?.regular?.status === "confirmed" && comparisons?.placebo?.status === "confirmed") {
+    return "分けて買うときの日の選び方として確認済み";
+  }
+  if ([lump, comparisons?.regular?.status, comparisons?.placebo?.status].includes("candidate")) {
+    return "候補（前向きに確認中）";
+  }
+  if (lump === "unfavorable") return "過去は、初日に一括で買うほうが有利でした";
+  return "有効性は未確認です";
 }

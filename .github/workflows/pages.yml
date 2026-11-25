@@ -8,14 +8,16 @@ on:
     - cron: "30 12 * * 1-5"
 permissions:
   contents: read
-  pages: write
-  id-token: write
 concurrency:
   group: pages
   cancel-in-progress: false
 jobs:
   publish:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -27,10 +29,40 @@ jobs:
           cache: pip
       - uses: actions/configure-pages@v5
       - run: python -m pip install -r requirements.txt
-      - run: python -m nbt.build --out site/data --run-kind "$RUN_KIND"
+      # 予測の台帳(docs/SPEC.md 4.9)を読むために取り出す。失敗したら、台帳なしでビルドと配備を続ける。
+      - name: Fetch the forecast ledger
+        id: ledger
+        continue-on-error: true
+        run: |
+          set -eu
+          url="https://github.com/${GITHUB_REPOSITORY}.git"
+          dir="$RUNNER_TEMP/forward-log"
+          status=0
+          git ls-remote --exit-code --heads "$url" forward-log > /dev/null || status=$?
+          if [ "$status" -eq 0 ]; then
+            git clone --quiet --depth 1 --branch forward-log "$url" "$dir"
+          elif [ "$status" -eq 2 ]; then
+            # ブランチがまだない。空のフォルダから始め、保存のジョブがブランチを作る。
+            mkdir -p "$dir"
+          else
+            exit "$status"
+          fi
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+      - run: python -m nbt.build --out site/data --run-kind "$RUN_KIND" ${LEDGER_DIR:+--ledger "$LEDGER_DIR"}
         env:
           VAPID_PUBLIC_KEY: ${{ vars.VAPID_PUBLIC_KEY }}
           RUN_KIND: ${{ (github.event.schedule == '30 22 * * 0-4' && 'morning') || (github.event_name == 'schedule' && 'evening') || (github.event_name == 'push' && 'push') || 'manual' }}
+          LEDGER_DIR: ${{ steps.ledger.outputs.dir }}
+      # このジョブはリポジトリへ書けない。台帳の記録は成果物として、書き込み権限を持つ次のジョブへ渡す。
+      - name: Hand over the ledger rows
+        if: ${{ !cancelled() && steps.ledger.outputs.dir != '' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: forward-log-${{ github.run_attempt }}
+          path: ${{ steps.ledger.outputs.dir }}/**/*.jsonl
+          if-no-files-found: ignore
+          retention-days: 7
       # 成果物の名前に実行の回数を付ける。同じ実行をやり直すと成果物がもう 1 つできるので、
       # 名前が同じだと deploy-pages が「複数ある」と止まる。
       - uses: actions/upload-pages-artifact@v4
@@ -50,3 +82,54 @@ jobs:
           PUSH_CONFIG: ${{ secrets.PUSH_CONFIG }}
           VAPID_PRIVATE_KEY: ${{ secrets.VAPID_PRIVATE_KEY }}
           VAPID_SUBJECT: ${{ vars.VAPID_SUBJECT }}
+
+  # 台帳をブランチ forward-log へ足す。書き込み権限はこのジョブだけが持ち、
+  # 依存パッケージのコードは動かさない(checkout も pip もしない)。
+  ledger:
+    needs: publish
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Receive the ledger rows
+        id: rows
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          name: forward-log-${{ github.run_attempt }}
+          path: rows
+      - name: Append to the forward-log branch
+        if: steps.rows.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          url="https://github.com/${GITHUB_REPOSITORY}.git"
+          status=0
+          git ls-remote --exit-code --heads "$url" forward-log > /dev/null || status=$?
+          if [ "$status" -eq 0 ]; then
+            git clone --quiet --depth 1 --branch forward-log "$url" repo
+          elif [ "$status" -eq 2 ]; then
+            git init --quiet --initial-branch forward-log repo
+          else
+            exit "$status"
+          fi
+          # 台帳は足すだけ。すでにある行が 1 バイトでも変わっていたら保存しない。
+          find rows -type f -name '*.jsonl' | while read -r new; do
+            old="repo/${new#rows/}"
+            if [ -f "$old" ]; then
+              size=$(stat --format %s "$old")
+              cmp --silent --bytes "$size" "$old" "$new" || { echo "ledger: existing rows changed" >&2; exit 1; }
+            fi
+          done
+          cp -R rows/. repo/
+          cd repo
+          git add --all
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit --quiet --message "予測の記録を足す"
+          git push --quiet "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:refs/heads/forward-log

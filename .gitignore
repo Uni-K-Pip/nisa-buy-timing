@@ -6,6 +6,8 @@ __pycache__/
 
 # ビルドで生成するデータ(Pages へは Actions が配備する)
 site/data/
+# 手元の探索の出力(残すものは docs/experiments/ へ写す)
+.explore/
 
 # 秘密と個人データ(リポジトリに入れない)
 .env
