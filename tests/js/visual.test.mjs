@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { parseDay } from "../../site/js/calendar.js";
-import { clampPercent, displayScore, elementName, gaugeArc, gaugePoint, shortDay, symmetricAxis,
+import { clampPercent, displayScore, elementName, evidenceHeading, evidenceStatus, gaugeArc, gaugePoint,
+  intervalText, isPrimaryCondition, modelMetric, shortDay, signedPercent, signedPoints, symmetricAxis,
   timeTicks, valueAxis, ZONES, zoneDescription, zoneOf } from "../../site/js/visual.js";
 
 test("画面に出す整数のスコアは、区分の下限と食い違わない", () => {
@@ -131,4 +132,60 @@ test("区分の説明を過去との比較で示し、区分がなければ算�
     .map(word => "過去5年のこの投信の中で、" + word + "水準です。"));
   assert.equal(zoneDescription(null), "スコアを算出できません。");
   assert.equal(zoneDescription({}), "スコアを算出できません。");
+});
+
+test("検証の各状態を表示名・説明・色に対応させ、未知の状態には表示を付けない", () => {
+  assert.deepEqual(evidenceStatus("unconfirmed"), { label: "有効性未確認", tone: "neutral",
+    description: "過去データでは、偶然と区別できる差を確認できていません。" });
+  assert.deepEqual(evidenceStatus("unfavorable"), { label: "過去は不利", tone: "warning",
+    description: "過去データでは、平均で高く買う結果でした（95% 区間がゼロより上）。" });
+  assert.deepEqual(evidenceStatus("candidate"), { label: "候補", tone: "candidate",
+    description: "過去データでは基準を満たしました。条件を固定したあとのデータで確認中です。" });
+  assert.deepEqual(evidenceStatus("confirmed"), { label: "確認済み", tone: "confirmed",
+    description: "条件を固定したあとのデータでも基準を満たしました。" });
+  for (const value of [null, undefined, "", "unknown", "toString"]) assert.equal(evidenceStatus(value), null);
+});
+
+test("区間はゼロを含む端点や同じ端点を保ち、指標に合う単位で表示する", () => {
+  assert.equal(intervalText([-0.23, 0.7], signedPercent), "-0.23% 〜 +0.7%");
+  assert.equal(intervalText([0, 0], signedPercent), "0% 〜 0%");
+  const gap = String.fromCharCode(0xa0);
+  assert.equal(intervalText([0, 0.1], signedPoints), "0" + gap + "pt 〜 +0.1" + gap + "pt");
+  assert.equal(signedPoints(-0.0), "0" + gap + "pt");
+  assert.equal(signedPercent(-0.001), "0%");
+  assert.equal(intervalText([0.5, 0.5541], modelMetric), "0.5 〜 0.5541");
+  assert.equal(intervalText([-1, 0]), "-1 〜 0");
+});
+
+test("欠けた区間、有限でない端点、逆順の区間はダッシュ", () => {
+  for (const bounds of [null, undefined, [], [0], [0, 0, 1], [null, 0], [0, Infinity], [1, 0], Array(2)]) {
+    assert.equal(intervalText(bounds, signedPercent), "—");
+  }
+});
+
+test("主条件は期間・回数・閾値のすべてが一致するときだけ", () => {
+  const primary = { window: 40, count: 3, threshold: 70 };
+  assert.equal(isPrimaryCondition({ ...primary, score: {} }, primary), true);
+  for (const [key, value] of Object.entries(primary)) {
+    assert.equal(isPrimaryCondition({ ...primary, [key]: value + 1 }, primary), false);
+    assert.equal(isPrimaryCondition({ ...primary, [key]: String(value) }, primary), false);
+  }
+  assert.equal(isPrimaryCondition(null, primary), false);
+  assert.equal(isPrimaryCondition(primary, null), false);
+  assert.equal(isPrimaryCondition({}, {}), false);
+  assert.equal(isPrimaryCondition({ ...primary, threshold: null }, { ...primary, threshold: null }), false);
+});
+
+test("結論は対一括の確認済み、分けて買う場合の確認済み、候補、過去は不利の順で決める", () => {
+  const heading = (regular, lump, placebo) => evidenceHeading({ regular: { status: regular },
+    lump: { status: lump }, placebo: { status: placebo } });
+  assert.equal(heading("confirmed", "confirmed", "confirmed"), "一括より有利（確認済み）");
+  assert.equal(heading("confirmed", "candidate", "confirmed"), "分けて買うときの日の選び方として確認済み");
+  assert.equal(heading("candidate", "unfavorable", "unconfirmed"), "候補（前向きに確認中）");
+  assert.equal(heading("unconfirmed", "candidate", "unconfirmed"), "候補（前向きに確認中）");
+  assert.equal(heading("unconfirmed", "unfavorable", "candidate"), "候補（前向きに確認中）");
+  assert.equal(heading("confirmed", "unfavorable", "unconfirmed"), "過去は、初日に一括で買うほうが有利でした");
+  assert.equal(heading("confirmed", "unconfirmed", "unconfirmed"), "有効性は未確認です");
+  assert.equal(heading("unfavorable", "unconfirmed", "confirmed"), "有効性は未確認です");
+  assert.equal(evidenceHeading(null), "有効性は未確認です");
 });

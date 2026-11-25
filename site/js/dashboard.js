@@ -1,7 +1,7 @@
 import { businessDaysBetween, lastOrderDay, orderSchedule, parseDay } from "./calendar.js";
 import { checkPlan } from "./plan.js";
 import { bar, button, card, chip, details, el, emptyState, icon, installmentDots, issueList,
-  movementChip, number, paragraph, percent, probability, svg, table, zoneLegend, zonePill } from "./ui.js";
+  MODEL_VALID_NOTE, movementChip, number, paragraph, percent, probability, svg, table, zoneLegend, zonePill } from "./ui.js";
 import { displayScore, elementName, gaugeArc, gaugePoint, shortDay, ZONES, zoneDescription, zoneOf } from "./visual.js";
 
 export { renderChart } from "./chart.js";
@@ -20,7 +20,8 @@ function guide(context) {
     })),
     el("ol", { class: "guide-steps" },
       el("li", {}, icon("gauge"),
-        el("div", {}, paragraph("スコアは0〜100。高いほど、過去5年のこの投信の中で安い水準です。"), zoneLegend())),
+        el("div", {}, paragraph("スコアは0〜100。高いほど、過去5年のこの投信の中で安い水準です。"),
+          paragraph("朝の更新では、その日の基準価額の見込みを含めて計算します。"), zoneLegend())),
       step("clock", "スコアは過去との比較です。将来の値動きを当てるものではありません。"),
       step("calendar", "「計画」で買う日と金額を決め、「設定」で通知を受け取れます。")));
 }
@@ -115,16 +116,27 @@ function priceTile(label, quote, unit, { estimate = false, digits = 2 } = {}) {
       : hasValue ? paragraph(shortDay(date), "secondary") : null);
 }
 
+function estimateNote(reading) {
+  if (reading.basis !== "estimate") return null;
+  const date = parseDay(reading.date) === null ? "" : "（" + shortDay(reading.date) + " の見込み）";
+  const confirmed = reading.confirmed;
+  return paragraph("推定基準価額を含みます" + date + (confirmed
+    ? "。確定値では " + displayScore(confirmed.value) + "（" + shortDay(confirmed.date) + " 時点）"
+    : "") + "。", "secondary");
+}
+
 function modelSummary(ml) {
   const reading = Number.isFinite(ml.probability) ? ml.probability * 100 : null;
   return el("section", { class: "fund-section" },
     el("h3", { class: "split-heading" }, "機械学習の参考値", chip("実験")),
     ml.valid ? el("div", { class: "notice" },
-      paragraph("有効（過去の検証基準を満たした実験モデル）"),
+      paragraph(MODEL_VALID_NOTE),
       el("p", {}, "20営業日待てば安く買えた確率 ", el("strong", {}, probability(ml.probability))),
+      estimateNote(ml),
       bar(reading))
       : el("div", {}, el("h3", { class: "notice warning" }, "無効。 " + (ml.note || INVALID_MODEL)),
-        paragraph("20営業日待てば安く買えた確率 · 参考値 " + probability(ml.probability), "secondary")));
+        paragraph("20営業日待てば安く買えた確率 · 参考値 " + probability(ml.probability), "secondary"),
+        estimateNote(ml)));
 }
 
 const GLOSSARY = [
@@ -155,7 +167,7 @@ function todayCard(fund, context) {
       chip(shortDay(score.date) + (score.date ? " 時点" : ""), "date-chip")),
     outdated ? paragraph("価格データの更新が遅れています。基準日を確認してください。", "notice warning") : null,
     gauge(score.value, zone),
-    el("div", { class: "score-summary" }, paragraph(zoneDescription(zone)), scoreChange(score),
+    el("div", { class: "score-summary" }, estimateNote(score), paragraph(zoneDescription(zone)), scoreChange(score),
       paragraph((score.comparison ? score.comparison + "。 " : "") + "将来の値動きを示すものではありません。", "secondary")),
     fund.series_kind === "proxy" ? paragraph("円換算した代理系列の過去価格で算出しています。", "notice") : null,
     plans.length ? el("section", { class: "fund-section" }, el("h3", {}, "この銘柄の計画"),

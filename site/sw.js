@@ -1,4 +1,4 @@
-const VERSION = "v0.2";
+const VERSION = "v0.3";
 const SHELL = "nbt-shell-" + VERSION;
 const DATA = "nbt-data-" + VERSION;
 const SCOPE = new URL(self.registration.scope);

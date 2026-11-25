@@ -1,0 +1,22 @@
+{
+  "schema": 2,
+  "protocol": {
+    "alpha": 0.05,
+    "looks_years": [2, 3, 4, 5, 6],
+    "max_concurrent_versions": 5,
+    "min_forward_years": 2,
+    "min_independent_windows": 12,
+    "practical_margin_pct": 0.5,
+    "bootstrap_draws": 2000,
+    "judgment_bootstrap_draws": 50000
+  },
+  "strategies": [
+    {"id": "score", "kind": "score", "version": 1, "registered": "2026-11-25",
+     "primary": {"window": 40, "count": 3, "threshold": 70}, "fingerprint": "02600ec37d381f7b"},
+    {"id": "ml", "kind": "ml", "version": 1, "registered": "2026-11-25", "features": ["base"],
+     "primary": {"window": 40, "count": 3, "probability_at_most": 0.4}, "fingerprint": "da5f3baf8c273262"},
+    {"id": "ml-macro", "kind": "ml", "version": 1, "registered": "2026-11-25", "features": ["base", "rates_dollar"],
+     "primary": {"window": 40, "count": 3, "probability_at_most": 0.4}, "fingerprint": "5f444c8b0756a42e"}
+  ],
+  "retired": []
+}
